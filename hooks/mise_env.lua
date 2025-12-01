@@ -89,15 +89,57 @@ function PLUGIN:MiseEnv(ctx)
     -- First, apply default environment variables
     add_env_vars(default_env)
     
-    -- Check for pattern matches (e.g., feature/*, bugfix/*)
+    -- Separate exact patterns from wildcard patterns
+    local exact_patterns = {}
+    local wildcard_patterns = {}
+    
     for pattern, pattern_env in pairs(patterns) do
-        -- Simple pattern matching: check if branch starts with pattern
-        if current_branch:sub(1, #pattern) == pattern then
+        if pattern:find("*", 1, true) then
+            table.insert(wildcard_patterns, {pattern = pattern, env = pattern_env})
+        else
+            exact_patterns[pattern] = pattern_env
+        end
+    end
+    
+    -- Apply wildcard patterns first (lower priority)
+    for _, item in ipairs(wildcard_patterns) do
+        local pattern = item.pattern
+        local pattern_env = item.env
+        
+        -- Check if pattern ends with wildcard
+        if pattern:sub(-1) == "*" then
+            -- Remove the * and check if branch starts with the prefix
+            local prefix = pattern:sub(1, -2)
+            if current_branch:sub(1, #prefix) == prefix then
+                add_env_vars(pattern_env)
+            end
+        elseif pattern:sub(1, 1) == "*" then
+            -- Suffix matching: *-staging, *-prod
+            local suffix = pattern:sub(2)
+            if current_branch:sub(-#suffix) == suffix then
+                add_env_vars(pattern_env)
+            end
+        else
+            -- Middle wildcard: release-*-final
+            local before, after = pattern:match("^(.*)%*(.*)$")
+            if before and after then
+                if current_branch:sub(1, #before) == before and 
+                   current_branch:sub(-#after) == after then
+                    add_env_vars(pattern_env)
+                end
+            end
+        end
+    end
+    
+    -- Apply exact pattern matches (higher priority than wildcards)
+    for pattern, pattern_env in pairs(exact_patterns) do
+        -- Exact match on the full branch name
+        if current_branch == pattern then
             add_env_vars(pattern_env)
         end
     end
     
-    -- Check for exact branch match (overrides patterns and defaults)
+    -- Check for exact branch match (highest priority - overrides everything)
     if branches[current_branch] then
         add_env_vars(branches[current_branch])
     end
