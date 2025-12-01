@@ -76,6 +76,34 @@ function PLUGIN:MiseEnv(ctx)
     local patterns = config.patterns or {}
     local default_env = config.default or {}
     
+    -- Function to convert glob pattern to Lua pattern
+    local function glob_to_pattern(glob)
+        -- Escape special Lua pattern characters except *
+        local pattern = glob:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1")
+        -- Replace * with .*
+        pattern = pattern:gsub("%*", ".*")
+        -- Anchor the pattern to match the whole string
+        return "^" .. pattern .. "$"
+    end
+    
+    -- Function to check if a branch matches a pattern
+    local function matches_pattern(branch, pattern)
+        if pattern:find("*", 1, true) then
+            -- It's a wildcard pattern - use glob matching
+            local lua_pattern = glob_to_pattern(pattern)
+            return branch:match(lua_pattern) ~= nil
+        else
+            -- Exact match
+            return branch == pattern
+        end
+    end
+    
+    -- Function to count non-wildcard characters (for specificity)
+    local function pattern_specificity(pattern)
+        local non_wildcard = pattern:gsub("%*", "")
+        return #non_wildcard
+    end
+    
     -- Function to add environment variables from a table
     local function add_env_vars(env_table)
         for key, value in pairs(env_table) do
@@ -89,54 +117,37 @@ function PLUGIN:MiseEnv(ctx)
     -- First, apply default environment variables
     add_env_vars(default_env)
     
-    -- Separate exact patterns from wildcard patterns
-    local exact_patterns = {}
-    local wildcard_patterns = {}
+    -- Collect all matching patterns with their specificity
+    local matching_patterns = {}
     
     for pattern, pattern_env in pairs(patterns) do
-        if pattern:find("*", 1, true) then
-            table.insert(wildcard_patterns, {pattern = pattern, env = pattern_env})
-        else
-            exact_patterns[pattern] = pattern_env
+        if matches_pattern(current_branch, pattern) then
+            table.insert(matching_patterns, {
+                pattern = pattern,
+                env = pattern_env,
+                specificity = pattern_specificity(pattern),
+                has_wildcard = pattern:find("*", 1, true) ~= nil
+            })
         end
     end
     
-    -- Apply wildcard patterns first (lower priority)
-    for _, item in ipairs(wildcard_patterns) do
-        local pattern = item.pattern
-        local pattern_env = item.env
-        
-        -- Check if pattern ends with wildcard
-        if pattern:sub(-1) == "*" then
-            -- Remove the * and check if branch starts with the prefix
-            local prefix = pattern:sub(1, -2)
-            if current_branch:sub(1, #prefix) == prefix then
-                add_env_vars(pattern_env)
-            end
-        elseif pattern:sub(1, 1) == "*" then
-            -- Suffix matching: *-staging, *-prod
-            local suffix = pattern:sub(2)
-            if current_branch:sub(-#suffix) == suffix then
-                add_env_vars(pattern_env)
-            end
-        else
-            -- Middle wildcard: release-*-final
-            local before, after = pattern:match("^(.*)%*(.*)$")
-            if before and after then
-                if current_branch:sub(1, #before) == before and 
-                   current_branch:sub(-#after) == after then
-                    add_env_vars(pattern_env)
-                end
-            end
+    -- Sort patterns by specificity (more specific = higher priority)
+    -- Patterns with more non-wildcard characters are more specific
+    table.sort(matching_patterns, function(a, b)
+        -- First compare by specificity
+        if a.specificity ~= b.specificity then
+            return a.specificity < b.specificity
         end
-    end
+        -- If same specificity, exact matches (no wildcard) come after wildcards
+        if a.has_wildcard ~= b.has_wildcard then
+            return a.has_wildcard
+        end
+        return false
+    end)
     
-    -- Apply exact pattern matches (higher priority than wildcards)
-    for pattern, pattern_env in pairs(exact_patterns) do
-        -- Exact match on the full branch name
-        if current_branch == pattern then
-            add_env_vars(pattern_env)
-        end
+    -- Apply matching patterns in order of increasing specificity
+    for _, item in ipairs(matching_patterns) do
+        add_env_vars(item.env)
     end
     
     -- Check for exact branch match (highest priority - overrides everything)
