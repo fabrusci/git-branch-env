@@ -76,7 +76,7 @@ function PLUGIN:MiseEnv(ctx)
     local patterns = config.patterns or {}
     local default_env = config.default or {}
     
-    -- Function to convert glob pattern to Lua pattern
+    -- Function to convert a simple glob pattern to a Lua pattern
     local function glob_to_pattern(glob)
         -- Escape special Lua pattern characters except *
         local pattern = glob:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1")
@@ -88,72 +88,60 @@ function PLUGIN:MiseEnv(ctx)
     
     -- Function to check if a branch matches a pattern
     local function matches_pattern(branch, pattern)
-        if pattern:find("*", 1, true) then
-            -- It's a wildcard pattern - use glob matching
+        if pattern:sub(-1) == "*" then
+            -- It's a glob pattern (e.g., "feature/*")
             local lua_pattern = glob_to_pattern(pattern)
             return branch:match(lua_pattern) ~= nil
         else
-            -- Exact match
-            return branch == pattern
+            -- It's a prefix pattern (e.g., "feature/")
+            return branch:sub(1, #pattern) == pattern
         end
     end
     
-    -- Function to count non-wildcard characters (for specificity)
-    local function pattern_specificity(pattern)
-        local non_wildcard = pattern:gsub("%*", "")
-        return #non_wildcard
+    -- Collect all applicable environment configurations in order of priority
+    -- The list will be sorted later, so we add them in any order.
+    -- Priority 0=default, 1=pattern, 2=exact branch
+    local applicable_configs = {}
+    
+    -- 1. Add default config (lowest priority)
+    table.insert(applicable_configs, { env = default_env, priority = 0, specificity = 0 })
+
+    -- 2. Collect all matching patterns
+    for pattern, pattern_env in pairs(patterns) do
+        if matches_pattern(current_branch, pattern) then
+            table.insert(applicable_configs, {
+                env = pattern_env,
+                priority = 1,
+                -- Specificity is the length of the pattern string itself.
+                -- "feature/ui/" is longer and thus more specific than "feature/".
+                specificity = #pattern
+            })
+        end
     end
     
-    -- Function to add environment variables from a table
-    local function add_env_vars(env_table)
-        for key, value in pairs(env_table) do
+    -- 3. Add exact branch match (highest priority)
+    if branches[current_branch] then
+        table.insert(applicable_configs, { env = branches[current_branch], priority = 2, specificity = #current_branch })
+    end
+    
+    -- Sort configurations: first by priority level, then by specificity (length)
+    table.sort(applicable_configs, function(a, b)
+        if a.priority ~= b.priority then
+            return a.priority < b.priority
+        end
+        return a.specificity < b.specificity
+    end)
+    
+    -- Apply all configurations in the final sorted order.
+    -- Later items will overwrite keys from earlier ones.
+    for _, config_item in ipairs(applicable_configs) do
+        for key, value in pairs(config_item.env) do
             table.insert(env_vars, {
                 key = key,
                 value = tostring(value)
             })
         end
     end
-    
-    -- First, apply default environment variables
-    add_env_vars(default_env)
-    
-    -- Collect all matching patterns with their specificity
-    local matching_patterns = {}
-    
-    for pattern, pattern_env in pairs(patterns) do
-        if matches_pattern(current_branch, pattern) then
-            table.insert(matching_patterns, {
-                pattern = pattern,
-                env = pattern_env,
-                specificity = pattern_specificity(pattern),
-                has_wildcard = pattern:find("*", 1, true) ~= nil
-            })
-        end
-    end
-    
-    -- Sort patterns by specificity (more specific = higher priority)
-    -- Patterns with more non-wildcard characters are more specific
-    table.sort(matching_patterns, function(a, b)
-        -- First compare by specificity
-        if a.specificity ~= b.specificity then
-            return a.specificity < b.specificity
-        end
-        -- If same specificity, exact matches (no wildcard) come after wildcards
-        if a.has_wildcard ~= b.has_wildcard then
-            return a.has_wildcard
-        end
-        return false
-    end)
-    
-    -- Apply matching patterns in order of increasing specificity
-    for _, item in ipairs(matching_patterns) do
-        add_env_vars(item.env)
-    end
-    
-    -- Check for exact branch match (highest priority - overrides everything)
-    if branches[current_branch] then
-        add_env_vars(branches[current_branch])
-    end
-    
+
     return env_vars
 end
