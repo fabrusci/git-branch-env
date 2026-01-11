@@ -8,17 +8,21 @@ function PLUGIN:MiseEnv(ctx)
     -- Get current git branch
     local function get_git_branch()
         -- First, check if we're in a git repository
-        local git_check = cmd.exec("git rev-parse --git-dir 2>/dev/null")
-        if not git_check then
+        local ok, git_check = pcall(cmd.exec, "git rev-parse --git-dir 2>/dev/null")
+        if not ok or not git_check or git_check:match("^%s*$") then
             return nil
         end
         
         -- Try to get current branch
-        local branch_result = cmd.exec("git branch --show-current 2>/dev/null")
+        local ok2, branch_result = pcall(cmd.exec, "git branch --show-current 2>/dev/null")
         
         -- If empty or nil, try alternative method (for detached HEAD)
-        if not branch_result then
-            branch_result = cmd.exec("git rev-parse --abbrev-ref HEAD 2>/dev/null")
+        if not ok2 or not branch_result then
+            local ok3, alt_result = pcall(cmd.exec, "git rev-parse --abbrev-ref HEAD 2>/dev/null")
+            if not ok3 then
+                return nil
+            end
+            branch_result = alt_result
         end
         
         -- Final check - return nil if still no result
