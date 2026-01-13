@@ -139,12 +139,30 @@ function PLUGIN:MiseEnv(ctx)
     -- Apply all configurations in the final sorted order.
     -- Later items will overwrite keys from earlier ones.
     for _, config_item in ipairs(applicable_configs) do
-        for key, value in pairs(config_item.env) do
-            table.insert(env_vars, {
-                key = key,
-                value = tostring(value)
-            })
-        end
+      for key, value in pairs(config_item.env) do
+          local final_value
+          if type(value) == "table" and value.pass then
+              -- Value is a table with a 'pass' key, fetch from pass
+              local pass_path = value.pass
+              local ok, pass_result = pcall(cmd.exec, "pass show " .. pass_path)
+
+              if ok and pass_result then
+                  -- pass returns the secret with a trailing newline, so we trim it.
+                  final_value = pass_result:match("^%s*(.-)%s*$")
+              else
+                  -- Silently fail, but a user can debug with MISE_DEBUG=1
+                  -- This prevents breaking the env if 'pass' is not installed or the secret is missing.
+                  final_value = nil
+              end
+          else
+              -- It's a regular string value
+              final_value = tostring(value)
+          end
+
+          if final_value ~= nil then
+              table.insert(env_vars, { key = key, value = final_value })
+          end
+      end
     end
 
     return env_vars
