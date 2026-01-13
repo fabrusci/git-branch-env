@@ -56,23 +56,11 @@ function PLUGIN:MiseEnv(ctx)
     -- Get the current branch
     local current_branch = get_git_branch()
     
-    -- If not in a git repository, return empty
-    if not current_branch then
-        return {}
-    end
-    
     local env_vars = {}
     
     -- Always set GIT_BRANCH and GIT_BRANCH_SAFE
-    table.insert(env_vars, {
-        key = "GIT_BRANCH",
-        value = current_branch
-    })
+    -- This will only run if we are in a git repository
     
-    table.insert(env_vars, {
-        key = "GIT_BRANCH_SAFE",
-        value = sanitize_branch_name(current_branch)
-    })
     
     -- Get configuration from context options
     local config = ctx.options or {}
@@ -108,25 +96,35 @@ function PLUGIN:MiseEnv(ctx)
     local applicable_configs = {}
     
     -- 1. Add default config (lowest priority)
+    -- This will be the only config for non-git projects.
     table.insert(applicable_configs, { env = default_env, priority = 0, specificity = 0 })
 
-    -- 2. Collect all matching patterns
-    for pattern, pattern_env in pairs(patterns) do
-        if matches_pattern(current_branch, pattern) then
-            table.insert(applicable_configs, {
-                env = pattern_env,
-                priority = 1,
-                -- Specificity is the length of the pattern string itself.
-                -- "feature/ui/" is longer and thus more specific than "feature/".
-                specificity = #pattern
-            })
+    -- If we are in a git repo, process branch and pattern configs
+    if current_branch then
+        -- Always set GIT_BRANCH and GIT_BRANCH_SAFE
+        table.insert(env_vars, { key = "GIT_BRANCH", value = current_branch })
+        table.insert(env_vars, { key = "GIT_BRANCH_SAFE", value = sanitize_branch_name(current_branch) })
+
+        -- 2. Collect all matching patterns
+        for pattern, pattern_env in pairs(patterns) do
+            if matches_pattern(current_branch, pattern) then
+                table.insert(applicable_configs, {
+                    env = pattern_env,
+                    priority = 1,
+                    -- Specificity is the length of the pattern string itself.
+                    -- "feature/ui/" is longer and thus more specific than "feature/".
+                    specificity = #pattern
+                })
+            end
+        end
+
+        -- 3. Add exact branch match (highest priority)
+        if branches[current_branch] then
+            table.insert(applicable_configs, { env = branches[current_branch], priority = 2, specificity = #current_branch })
         end
     end
     
-    -- 3. Add exact branch match (highest priority)
-    if branches[current_branch] then
-        table.insert(applicable_configs, { env = branches[current_branch], priority = 2, specificity = #current_branch })
-    end
+    
     
     -- Sort configurations: first by priority level, then by specificity (length)
     table.sort(applicable_configs, function(a, b)
