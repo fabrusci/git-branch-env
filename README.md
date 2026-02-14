@@ -9,6 +9,7 @@ A mise environment plugin that automatically sets environment variables based on
 - 🔍 Pattern matching for branch prefixes (e.g., `feature/*`, `bugfix/*`)
 - 📝 Exports `GIT_BRANCH` and `GIT_BRANCH_SAFE` variables
 - ⚙️ Configurable defaults with branch-specific overrides
+- 🔐 Integration with `pass` password manager for secure secrets
 
 ## Installation
 
@@ -296,6 +297,72 @@ API_ENV = "production"
 ```
 
 Project-specific configuration in `.mise.toml` will override global settings.
+
+## Secrets Management with Pass
+
+The plugin integrates with the [pass](https://www.passwordstore.org/) password manager to securely store and retrieve secrets.
+
+### Prerequisites
+
+Install and initialize `pass`:
+
+```bash
+# macOS
+brew install pass
+
+# Linux
+apt-get install pass  # Debian/Ubuntu
+yum install pass      # RHEL/CentOS
+
+# Initialize with your GPG key
+pass init your-gpg-key-id
+```
+
+### Storing Secrets
+
+```bash
+pass insert myapp/prod/database-password
+pass insert myapp/prod/api-key
+pass insert myapp/dev/database-password
+```
+
+### Using Secrets in Configuration
+
+Use the `{ pass = "path/to/secret" }` syntax instead of plain strings:
+
+```toml
+[env._.git-branch-env.branches.main]
+# Regular string values
+DATABASE_URL = "postgresql://localhost/prod"
+API_ENV = "production"
+# Secrets from pass
+DATABASE_PASSWORD = { pass = "myapp/prod/database-password" }
+API_KEY = { pass = "myapp/prod/api-key" }
+AWS_SECRET_ACCESS_KEY = { pass = "aws/production/secret-key" }
+
+[env._.git-branch-env.branches.develop]
+DATABASE_URL = "postgresql://localhost/dev"
+DATABASE_PASSWORD = { pass = "myapp/dev/database-password" }
+API_KEY = { pass = "myapp/dev/api-key" }
+
+[env._.git-branch-env.patterns."feature/"]
+# Feature branches can use dev secrets
+DATABASE_PASSWORD = { pass = "myapp/dev/database-password" }
+```
+
+### How It Works
+
+1. When the plugin encounters `{ pass = "path/to/secret" }`, it executes `pass show path/to/secret`
+2. The secret value is retrieved and set as the environment variable
+3. If `pass` fails (not installed or secret missing), the variable is silently skipped
+4. Use `MISE_DEBUG=1 mise env` to debug secret retrieval issues
+
+### Security Benefits
+
+- Secrets are encrypted with GPG
+- Secrets are not stored in plain text in configuration files
+- Different secrets per branch (prod vs dev credentials)
+- Secrets are only decrypted when needed
 
 ## Examples
 
