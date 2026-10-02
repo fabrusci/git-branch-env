@@ -1,6 +1,6 @@
 # `git-branch-env` — mise Plugin Documentation
 
-**Author:** Francesco Abrusci | **Version:** 1.0.0
+**Author:** Francesco Abrusci | **Version:** 2.0.0
 
 A mise environment plugin that automatically sets environment variables based on the current git branch, enabling branch-aware configurations without any manual switching.
 
@@ -10,10 +10,12 @@ A mise environment plugin that automatically sets environment variables based on
 
 When mise loads the environment (on `cd`, shell startup, or branch switch), the plugin:
 
-1. Detects the current git branch via `git branch --show-current` (falls back to `git rev-parse --abbrev-ref HEAD` for detached HEAD state)
+1. Detects the current git branch by **reading `.git/HEAD` directly** — no `git` subprocess is spawned. It walks up from the project root the same way git itself resolves a repo, and follows `gitdir:` redirection for worktrees/submodules. Detached HEAD is reported as the literal string `HEAD` (same as `git rev-parse --abbrev-ref HEAD`).
 2. Collects all matching configuration blocks (default, patterns, exact branches)
 3. Merges them in priority order — higher priority values overwrite lower ones
 4. Exports the resulting variables into the shell environment
+
+> **v2 note:** v1 shelled out to `git` up to 3 times per call. Since mise re-evaluates env on every shell prompt while inside the project, this meant 2-3 `git` forks per prompt — harmless on an idle host, but on a host already under process/thread pressure it became a self-feeding fork storm that froze the shell entirely. v2 needs zero subprocess forks for branch detection (verified by running with `git` absent from `PATH`). Behavior and configuration are unchanged — this is a drop-in upgrade.
 
 ---
 
@@ -120,6 +122,8 @@ API_KEY           = { pass = "myapp/prod/api-key" }
 
 At runtime the plugin runs `pass show myapp/prod/db-password` and injects the result as the environment variable. If `pass` is not installed or the secret is missing, the variable is **silently skipped** (use `MISE_DEBUG=1 mise env` to diagnose).
 
+This is the only subprocess the plugin still spawns. Since v2, it's bounded by a hard 5s timeout (a stuck `gpg-agent`/pinentry can no longer hang the shell indefinitely) and backed by a 5s TTL file cache, so a repeated secret lookup isn't re-invoked on every single prompt.
+
 ---
 
 ## Automatic Reload on Branch Switch
@@ -177,6 +181,9 @@ mise plugin ls
 
 # Confirm git branch detection
 git branch --show-current
+
+# Prove branch detection needs zero `git` forks (sanity check after any change)
+env PATH=/nonexistent mise env
 ```
 
 ---
