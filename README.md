@@ -11,6 +11,27 @@ A mise environment plugin that automatically sets environment variables based on
 - ⚙️ Configurable defaults with branch-specific overrides
 - 🔐 Integration with `pass` password manager for secure secrets
 
+## v2: performance & safety fix
+
+v1 shelled out to `git` up to 3 times per `MiseEnv` call (`git rev-parse
+--git-dir`, `git branch --show-current`, and a fallback `git rev-parse
+--abbrev-ref HEAD`), and mise re-evaluates env on every shell prompt while
+inside the project. On a host already under process/thread pressure this
+turned into a self-feeding fork storm (hundreds of stuck `git` processes,
+whole shell frozen).
+
+v2 detects the branch by reading `.git/HEAD` directly (walking up to the repo
+root and following `gitdir:` redirection for worktrees/submodules, same as
+git itself) - **zero subprocess forks** for branch detection, verified by
+running with `git` absent from `PATH` entirely. The only remaining
+subprocess is the optional `pass` secret lookup, which now has a hard 5s
+timeout (`cmd.exec(..., {timeout = 5})`) so a stuck `gpg-agent`/pinentry can
+no longer hang the shell indefinitely, plus a short TTL cache so it isn't
+re-invoked on every single prompt.
+
+Behavior (default/patterns/branches priority, wildcard patterns, `GIT_BRANCH`
+/`GIT_BRANCH_SAFE`, `pass` secrets) is unchanged - this is a drop-in upgrade.
+
 ## Installation
 
 ### 1. Create Plugin Directory

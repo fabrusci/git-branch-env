@@ -1,166 +1,175 @@
 -- hooks/mise_env.lua
--- Main hook function that sets environment variables based on git branch
+-- Sets environment variables based on the current git branch.
+--
+-- v2: branch detection reads .git/HEAD directly instead of shelling out to
+-- `git` (v1 forked up to 3 `git` processes per invocation, repeated on every
+-- shell prompt -> under process/thread pressure this caused a runaway fork
+-- storm and froze the whole shell). The optional `pass` secret lookup is the
+-- only remaining subprocess call: it now has a hard timeout (a stuck
+-- gpg-agent/pinentry can no longer hang the shell forever) and a short TTL
+-- cache so it isn't re-invoked on every single prompt.
+
+local file = require("file")
+local cmd = require("cmd")
+
+local PASS_TIMEOUT_SECONDS = 5
+local PASS_CACHE_TTL_SECONDS = 5
+local PASS_CACHE_DIR = (os.getenv("TMPDIR") or "/tmp") .. "/mise-git-branch-env-pass-cache"
+
+local function read_file(path)
+    local ok, content = pcall(file.read, path)
+    if ok then return content end
+    return nil
+end
+
+-- Walk up from start_dir looking for .git, same resolution order git itself
+-- uses. Handles both a normal repo (.git is a directory) and a worktree or
+-- submodule (.git is a file containing "gitdir: <path>"). No subprocess.
+local function find_git_dir(start_dir)
+    local dir = start_dir
+    for _ = 1, 64 do -- sane upper bound, guards against a broken/looping fs
+        local git_path = file.join_path(dir, ".git")
+        if file.exists(git_path) then
+            local stat = file.stat(git_path)
+            if stat and stat.is_dir then
+                return git_path
+            end
+            local content = read_file(git_path)
+            local gitdir = content and content:match("gitdir:%s*(.-)%s*$")
+            if gitdir then
+                if not gitdir:match("^/") and not gitdir:match("^%a:[\\/]") then
+                    gitdir = file.join_path(dir, gitdir)
+                end
+                return gitdir
+            end
+            return nil
+        end
+        local parent = dir:match("^(.*)[/\\][^/\\]+$")
+        if not parent or parent == dir then break end
+        dir = parent
+    end
+    return nil
+end
+
+local function get_current_branch(start_dir)
+    local git_dir = find_git_dir(start_dir or ".")
+    if not git_dir then return nil end
+
+    local head = read_file(file.join_path(git_dir, "HEAD"))
+    if not head then return nil end
+
+    local branch = head:match("^ref:%s*refs/heads/(.-)%s*$")
+    if branch then return branch end
+
+    -- Detached HEAD: mirror v1's behaviour (`git rev-parse --abbrev-ref HEAD`
+    -- prints the literal string "HEAD" in this case).
+    return "HEAD"
+end
+
+local function sanitize_branch_name(branch)
+    if not branch then return "UNKNOWN" end
+    return (branch:gsub("/", "_"):gsub("%-", "_"):upper())
+end
+
+local function glob_to_pattern(glob)
+    local pattern = glob:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1")
+    pattern = pattern:gsub("%*", ".*")
+    return "^" .. pattern .. "$"
+end
+
+local function matches_pattern(branch, pattern)
+    if pattern:sub(-1) == "*" then
+        return branch:match(glob_to_pattern(pattern)) ~= nil
+    end
+    return branch:sub(1, #pattern) == pattern
+end
+
+local function pass_cache_path(secret_path)
+    local safe = secret_path:gsub("[^%w]", "_")
+    return file.join_path(PASS_CACHE_DIR, safe)
+end
+
+local function read_pass_cache(secret_path)
+    local f = io.open(pass_cache_path(secret_path), "r")
+    if not f then return nil end
+    local ts = f:read("*l")
+    local value = f:read("*l")
+    f:close()
+    if not ts or not value then return nil end
+    if (os.time() - tonumber(ts)) > PASS_CACHE_TTL_SECONDS then return nil end
+    return value
+end
+
+local function write_pass_cache(secret_path, value)
+    os.execute('mkdir -p "' .. PASS_CACHE_DIR .. '" 2>/dev/null')
+    local f = io.open(pass_cache_path(secret_path), "w")
+    if f then
+        f:write(tostring(os.time()) .. "\n" .. value .. "\n")
+        f:close()
+    end
+end
+
+local function resolve_pass_secret(secret_path)
+    local cached = read_pass_cache(secret_path)
+    if cached then return cached end
+
+    local ok, result = pcall(cmd.exec, "pass show " .. secret_path, { timeout = PASS_TIMEOUT_SECONDS })
+    if not ok or not result then
+        -- Silently skip, same as v1: a user can debug with MISE_DEBUG=1.
+        return nil
+    end
+
+    local value = result:match("^%s*(.-)%s*$")
+    write_pass_cache(secret_path, value)
+    return value
+end
 
 function PLUGIN:MiseEnv(ctx)
-    local cmd = require("cmd")
-    local strings = require("strings")
-    
-    -- Get current git branch
-    local function get_git_branch()
-        -- First, check if we're in a git repository
-        local ok, git_check = pcall(cmd.exec, "git rev-parse --git-dir 2>/dev/null")
-        if not ok or not git_check or git_check:match("^%s*$") then
-            return nil
-        end
-        
-        -- Try to get current branch
-        local ok2, branch_result = pcall(cmd.exec, "git branch --show-current 2>/dev/null")
-        
-        -- If empty or nil, try alternative method (for detached HEAD)
-        if not ok2 or not branch_result then
-            local ok3, alt_result = pcall(cmd.exec, "git rev-parse --abbrev-ref HEAD 2>/dev/null")
-            if not ok3 then
-                return nil
-            end
-            branch_result = alt_result
-        end
-        
-        -- Final check - return nil if still no result
-        if not branch_result then
-            return nil
-        end
-        
-        -- Manual trim instead of using strings.trim to avoid nil issues
-        local trimmed = branch_result:match("^%s*(.-)%s*$")
-        
-        -- Return nil if empty after trimming
-        if not trimmed or trimmed == "" then
-            return nil
-        end
-        
-        return trimmed
-    end
-    
-    -- Sanitize branch name for use in variable names
-    local function sanitize_branch_name(branch)
-        if not branch then return "UNKNOWN" end
-        
-        local sanitized = branch
-        sanitized = sanitized:gsub("/", "_")
-        sanitized = sanitized:gsub("-", "_")
-        sanitized = sanitized:upper()
-        
-        return sanitized
-    end
-    
-    -- Get the current branch
-    local current_branch = get_git_branch()
-    
-    local env_vars = {}
-    
-    -- Always set GIT_BRANCH and GIT_BRANCH_SAFE
-    -- This will only run if we are in a git repository
-    
-    
-    -- Get configuration from context options
     local config = ctx.options or {}
     local branches = config.branches or {}
     local patterns = config.patterns or {}
     local default_env = config.default or {}
-    
-    -- Function to convert a simple glob pattern to a Lua pattern
-    local function glob_to_pattern(glob)
-        -- Escape special Lua pattern characters except *
-        local pattern = glob:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1")
-        -- Replace * with .*
-        pattern = pattern:gsub("%*", ".*")
-        -- Anchor the pattern to match the whole string
-        return "^" .. pattern .. "$"
-    end
-    
-    -- Function to check if a branch matches a pattern
-    local function matches_pattern(branch, pattern)
-        if pattern:sub(-1) == "*" then
-            -- It's a glob pattern (e.g., "feature/*")
-            local lua_pattern = glob_to_pattern(pattern)
-            return branch:match(lua_pattern) ~= nil
-        else
-            -- It's a prefix pattern (e.g., "feature/")
-            return branch:sub(1, #pattern) == pattern
-        end
-    end
-    
-    -- Collect all applicable environment configurations in order of priority
-    -- The list will be sorted later, so we add them in any order.
-    -- Priority 0=default, 1=pattern, 2=exact branch
-    local applicable_configs = {}
-    
-    -- 1. Add default config (lowest priority)
-    -- This will be the only config for non-git projects.
-    table.insert(applicable_configs, { env = default_env, priority = 0, specificity = 0 })
 
-    -- If we are in a git repo, process branch and pattern configs
+    local current_branch = get_current_branch(ctx.config_root or ".")
+
+    local env_vars = {}
+    -- Priority 0=default, 1=pattern, 2=exact branch (same semantics as v1).
+    local applicable_configs = { { env = default_env, priority = 0, specificity = 0 } }
+
     if current_branch then
-        -- Always set GIT_BRANCH and GIT_BRANCH_SAFE
         table.insert(env_vars, { key = "GIT_BRANCH", value = current_branch })
         table.insert(env_vars, { key = "GIT_BRANCH_SAFE", value = sanitize_branch_name(current_branch) })
 
-        -- 2. Collect all matching patterns
         for pattern, pattern_env in pairs(patterns) do
             if matches_pattern(current_branch, pattern) then
-                table.insert(applicable_configs, {
-                    env = pattern_env,
-                    priority = 1,
-                    -- Specificity is the length of the pattern string itself.
-                    -- "feature/ui/" is longer and thus more specific than "feature/".
-                    specificity = #pattern
-                })
+                table.insert(applicable_configs, { env = pattern_env, priority = 1, specificity = #pattern })
             end
         end
 
-        -- 3. Add exact branch match (highest priority)
         if branches[current_branch] then
             table.insert(applicable_configs, { env = branches[current_branch], priority = 2, specificity = #current_branch })
         end
     end
-    
-    
-    
-    -- Sort configurations: first by priority level, then by specificity (length)
+
     table.sort(applicable_configs, function(a, b)
         if a.priority ~= b.priority then
             return a.priority < b.priority
         end
         return a.specificity < b.specificity
     end)
-    
-    -- Apply all configurations in the final sorted order.
-    -- Later items will overwrite keys from earlier ones.
+
     for _, config_item in ipairs(applicable_configs) do
-      for key, value in pairs(config_item.env) do
-          local final_value
-          if type(value) == "table" and value.pass then
-              -- Value is a table with a 'pass' key, fetch from pass
-              local pass_path = value.pass
-              local ok, pass_result = pcall(cmd.exec, "pass show " .. pass_path)
-
-              if ok and pass_result then
-                  -- pass returns the secret with a trailing newline, so we trim it.
-                  final_value = pass_result:match("^%s*(.-)%s*$")
-              else
-                  -- Silently fail, but a user can debug with MISE_DEBUG=1
-                  -- This prevents breaking the env if 'pass' is not installed or the secret is missing.
-                  final_value = nil
-              end
-          else
-              -- It's a regular string value
-              final_value = tostring(value)
-          end
-
-          if final_value ~= nil then
-              table.insert(env_vars, { key = key, value = final_value })
-          end
-      end
+        for key, value in pairs(config_item.env) do
+            local final_value
+            if type(value) == "table" and value.pass then
+                final_value = resolve_pass_secret(value.pass)
+            else
+                final_value = tostring(value)
+            end
+            if final_value ~= nil then
+                table.insert(env_vars, { key = key, value = final_value })
+            end
+        end
     end
 
     return env_vars
