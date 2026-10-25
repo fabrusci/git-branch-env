@@ -310,6 +310,28 @@ definition. Pointing both at the same resolved value (`mise env --json`,
 as above, or this plugin's own `PULUMI_STACK`) at least keeps the
 branch-to-stack *mapping* defined once, even if the trigger wiring isn't.
 
+**Two gotchas, found live rather than guessed at:**
+
+- **Quote the inner command with `"`, not `'`.** The TOML string's own
+  quotes don't matter; what matters is the shell command *value* they
+  produce. `enter = "echo 'hi $GIT_BRANCH'"` puts `$GIT_BRANCH` inside
+  single quotes in the actual `echo 'hi $GIT_BRANCH'` command - and
+  single quotes block variable expansion in sh/bash, so it prints the
+  literal text `$GIT_BRANCH`, not the branch name. Use
+  `enter = "echo \"hi $GIT_BRANCH\""` (escaped double quotes) instead -
+  verified directly that this is the only thing that changes, nothing to
+  do with mise or this plugin.
+- **`leave` can't read this plugin's (or any project) resolved env vars**,
+  by either path - not `$VAR` directly, and not `mise env --json | jq`
+  either. Verified directly: both came back empty on `leave`, both
+  correctly populated on `enter`, same `.mise.toml`, same vars. By the
+  time `leave`'s script runs, mise already considers the shell outside
+  the project, so there's nothing project-specific left to resolve - this
+  is why the `leave` example above hardcodes `"default"` instead of
+  reading a project var. If you need the value you *had* while inside,
+  capture it to a file during `enter` and have `leave` read that file
+  back, rather than trying to re-resolve it.
+
 ## Usage
 
 ### Automatic Environment Loading

@@ -320,6 +320,33 @@ resolved value (`mise env --json`, or this plugin's own `PULUMI_STACK`)
 at least keeps the branch→stack *mapping* itself defined once, even
 though the trigger wiring isn't shared.
 
+**Two gotchas, found live against a real `~/…/.mise.toml`, not guessed
+at:**
+
+- **Quote the inner shell command with `"`, not `'`.** A real config had
+  `enter = "echo 'entering branch $GIT_BRANCH, app=$APP_ENV'"` and printed
+  the literal text `entering branch $GIT_BRANCH, app=$APP_ENV` — not the
+  branch name. The TOML string's own quoting is irrelevant; what matters
+  is the *value* it produces: that value was the shell command
+  `echo 'entering branch $GIT_BRANCH, ...'`, and single quotes in sh/bash
+  block variable expansion, full stop — nothing to do with mise, hooks,
+  or this plugin. Fixed by escaping to double quotes inside the TOML
+  string: `enter = "echo \"entering branch $GIT_BRANCH, app=$APP_ENV\""`
+  — verified directly against that same file that this alone fixes it.
+- **`leave` cannot resolve this plugin's (or any project's) env vars**,
+  neither via a bare `$VAR` nor via `mise env --json | jq`. Verified
+  directly with one `.mise.toml` and `enter`/`leave` hooks that both
+  tried to print the same two variables both ways: `enter` got all four
+  values correctly every time; `leave` got empty/`MISSING` every time,
+  regardless of which of the two resolution methods was used. This isn't
+  a quoting issue or a plugin bug — by the time `leave`'s script runs,
+  mise already treats the shell as outside the project, so there is
+  nothing project-specific left to resolve. It's why the `leave` example
+  above hardcodes `"default"` rather than reading a project var; if you
+  need the value you had while inside, write it to a file during `enter`
+  and have `leave` read that file back instead of trying to re-resolve
+  it live.
+
 ---
 
 ## Installation
