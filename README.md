@@ -280,6 +280,36 @@ Notes:
 - Neither mechanism is Pulumi-specific - both apply to any tool that needs
   an imperative switch instead of an env var read.
 
+### Also triggering on directory enter/leave
+
+`_run` only fires on a branch change *while already inside* the repo -
+it has no opinion about `cd`-ing into or out of the directory itself.
+For that, use mise's own `[hooks]` table in `.mise.toml` - not something
+this plugin adds, just plain mise, and already verified directly (a real
+`cd` in and out of an activated shell) to fire exactly on those
+boundaries, not on every prompt:
+
+```toml
+[hooks]
+enter = "pulumi stack select \"$(mise env --json | jq -r '.PULUMI_STACK // empty')\""
+leave = "pulumi stack select default 2>/dev/null || true"
+```
+
+These two mechanisms are complementary, not alternatives, and don't
+overlap:
+- `[hooks].cd` fires on a real `cd` ending inside the project (`enter` /
+  `leave` are the "crossing the boundary" special cases of the same
+  thing) - **not** on a `git checkout` with no `cd` involved.
+- `_run` fires on a branch change - **not** on `cd`, since you can change
+  branch without ever leaving the directory.
+
+If you want the same command to run in both cases, you end up defining
+it twice - once in `[hooks]`, once in `_run` - since they're triggered by
+different mise subsystems with no built-in way to share a single
+definition. Pointing both at the same resolved value (`mise env --json`,
+as above, or this plugin's own `PULUMI_STACK`) at least keeps the
+branch-to-stack *mapping* defined once, even if the trigger wiring isn't.
+
 ## Usage
 
 ### Automatic Environment Loading
