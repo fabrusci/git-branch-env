@@ -16,6 +16,15 @@ local PASS_TIMEOUT_SECONDS = 5
 local PASS_CACHE_TTL_SECONDS = 5
 local PASS_CACHE_DIR = (os.getenv("TMPDIR") or "/tmp") .. "/mise-git-branch-env-pass-cache"
 
+-- POSIX single-quote escaping: wraps `s` so it is passed to /bin/sh as one
+-- literal argument, regardless of its content (spaces, `"`, `$`, backticks,
+-- `;`, etc). Needed because PASS_CACHE_DIR is derived from the TMPDIR env
+-- var and secret_path comes from user config - both untrusted input that
+-- would otherwise be interpolated straight into a shell command string.
+local function shell_quote(s)
+    return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
 local function read_file(path)
     local ok, content = pcall(file.read, path)
     if ok then return content end
@@ -101,11 +110,18 @@ local function read_pass_cache(secret_path)
 end
 
 local function write_pass_cache(secret_path, value)
-    os.execute('mkdir -p "' .. PASS_CACHE_DIR .. '" 2>/dev/null')
-    local f = io.open(pass_cache_path(secret_path), "w")
+    -- Secrets are cached in plaintext on disk, so the directory and the
+    -- cache file must be owner-only (0700/0600): anything looser would let
+    -- other local users read decrypted `pass` secrets out of TMPDIR.
+    local quoted_dir = shell_quote(PASS_CACHE_DIR)
+    os.execute('mkdir -p -m 700 ' .. quoted_dir .. ' 2>/dev/null && chmod 700 ' .. quoted_dir .. ' 2>/dev/null')
+
+    local path = pass_cache_path(secret_path)
+    local f = io.open(path, "w")
     if f then
         f:write(tostring(os.time()) .. "\n" .. value .. "\n")
         f:close()
+        os.execute('chmod 600 ' .. shell_quote(path) .. ' 2>/dev/null')
     end
 end
 
@@ -113,7 +129,7 @@ local function resolve_pass_secret(secret_path)
     local cached = read_pass_cache(secret_path)
     if cached then return cached end
 
-    local ok, result = pcall(cmd.exec, "pass show " .. secret_path, { timeout = PASS_TIMEOUT_SECONDS })
+    local ok, result = pcall(cmd.exec, "pass show " .. shell_quote(secret_path), { timeout = PASS_TIMEOUT_SECONDS })
     if not ok or not result then
         -- Silently skip, same as v1: a user can debug with MISE_DEBUG=1.
         return nil
