@@ -119,7 +119,7 @@ cat >> .mise.toml <<EOF
 [env._.git-branch-env.branches.run-demo]
 APP_ENV = "run-demo"
 RUN_LOG = "$DEMO/run-demo.log"
-_run = "echo RAN branch=\$GIT_BRANCH app=\$APP_ENV >> \$RUN_LOG"
+_run = "echo RAN branch=\$GIT_BRANCH app=\$APP_ENV >> \$RUN_LOG; echo '_run says: now on '\$GIT_BRANCH' (this line is on stderr, not captured by mise)'"
 EOF
 
 git add .mise.toml

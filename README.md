@@ -212,6 +212,13 @@ _run = "pulumi stack select $PULUMI_STACK"
   as everything else (`default` -> `patterns` -> `branches`).
 - Runs through a real shell (`sh -c`), so `&&`, pipes, `$VAR` expansion all
   work - unlike `{ pass = "..." }`, which only runs one fixed command.
+- Its own output (stdout and stderr) is streamed to the terminal, not
+  captured and discarded - redirected to *our* stderr, though, never our
+  stdout. That distinction matters: under an activated shell, mise's
+  hook-env stdout is what gets `eval`'d on every prompt, and unredirected
+  output from `_run` landing there breaks the next prompt (verified
+  directly - it shows up as a literal "command not found"). You'll still
+  see everything `_run` prints, just on stderr.
 - Hard 15s timeout; a failing or hanging command is skipped silently
   (same philosophy as `pass` - diagnose with `MISE_DEBUG=1`) and never
   retried on the same branch, so a broken command can't turn into "hangs

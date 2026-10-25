@@ -157,9 +157,9 @@ tuo password store reale. Per provarlo:
 ## 11. `_run`: comando eseguito al cambio di branch
 
 A differenza dello scenario `pass`, questo è già abilitato di default nella
-fixture (non richiede setup esterno): il branch `run-demo` ha
-`_run = "echo RAN branch=$GIT_BRANCH app=$APP_ENV >> $RUN_LOG"`, con
-`RUN_LOG` che punta a un file dentro la stessa fixture.
+fixture (non richiede setup esterno): il branch `run-demo` scrive una riga
+in un file di log (per una verifica deterministica) *e* stampa una riga sul
+proprio stdout (per verificare che tu la veda davvero a terminale).
 
 Nota: come per ogni altro scenario in questa guida, `_run` viene valutato
 solo quando mise ricalcola l'ambiente (`mise env`, o il prompt della shell
@@ -173,7 +173,24 @@ git checkout run-demo    # primo ingresso sul branch
 mise env >/dev/null      # -> deve eseguire
 cat run-demo.log
 ```
-Atteso: una riga `RAN branch=run-demo app=run-demo`.
+Atteso: una riga `RAN branch=run-demo app=run-demo` nel file, e sul
+terminale - nonostante il comando sopra reindirizzi *stdout* a
+`/dev/null` - la riga `_run says: now on run-demo (this line is on
+stderr, not captured by mise)`. Se la vedi comunque è la prova che
+l'output di `_run` arriva su stderr, non su stdout.
+
+```bash
+git checkout main && mise env >/dev/null   # per riportare lo stato a "visto" su main
+git checkout run-demo
+mise env 1>/dev/null 2>&1 | grep "_run says"
+```
+Qui invece reindirizziamo anche stderr nella pipe (`2>&1` dopo
+`1>/dev/null`, nell'ordine giusto) e lo filtriamo con `grep`: deve
+comunque comparire. Il punto è che l'output di `_run` non deve **mai**
+finire nello stesso stdout che una shell con `mise activate` manda a
+`eval` ad ogni prompt - altrimenti romperebbe il prompt successivo con un
+"command not found" (verificato mentre si progettava questa feature,
+vedi README.md).
 
 ```bash
 mise env >/dev/null      # stesso branch, nessun nuovo switch -> NON deve rieseguire

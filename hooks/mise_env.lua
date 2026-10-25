@@ -227,12 +227,22 @@ end
 -- effort: a failing or timed-out command is silently skipped (same
 -- philosophy as `pass`), and the marker is still updated so a broken
 -- command doesn't get retried on every single prompt.
+--
+-- Uses cmd.stream (not cmd.exec) so the command's own output reaches the
+-- user, instead of being captured and discarded. That output still needs
+-- to be kept off *our* stdout: under an activated shell, mise's hook-env
+-- stdout is what the shell `eval`s on every prompt, and anything else
+-- printed there breaks the next prompt (verified directly - an
+-- unredirected `echo` from a child command showed up as a literal
+-- "command not found" error). `{ command; } 1>&2` redirects the whole
+-- script's stdout to stderr - a trailing `1>&2` with no braces would only
+-- apply to the command's last statement, not everything before it.
 local function run_on_branch_change(head_path, current_branch, command, resolved_env, feature_in_use)
     if not feature_in_use then return end
     if read_last_branch(head_path) == current_branch then return end
 
     if command then
-        pcall(cmd.exec, "sh -c " .. shell_quote(command), {
+        pcall(cmd.stream, "sh -c " .. shell_quote("{ " .. command .. "; } 1>&2"), {
             env = env_entries_to_table(resolved_env),
             timeout = RUN_TIMEOUT_SECONDS,
         })

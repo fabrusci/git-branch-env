@@ -180,21 +180,43 @@ Mechanics:
   specificity among `default`/matching `patterns`/exact `branches` wins);
   it is read and stripped before the rest of the block is turned into env
   vars, so it's never exported itself.
-- Executed via `cmd.exec("sh -c " .. command, {...})` — a real shell, so
-  `&&`, `|`, `$VAR` expansion all work, unlike the fixed `pass show <path>`
-  invocation used for secrets.
-- The `env` table passed to `cmd.exec` is every resolved env var for the
+- Executed via `cmd.stream("sh -c " .. "{ command; } 1>&2", {...})` — a
+  real shell, so `&&`, `|`, `$VAR` expansion all work, unlike the fixed
+  `pass show <path>` invocation used for secrets. `cmd.stream` (not
+  `cmd.exec`) streams the child's own stdout/stderr through live instead
+  of capturing and discarding them, so you actually see what `_run`
+  prints.
+- That output is wrapped and redirected to *our* stderr, never our
+  stdout. Verified directly why this matters: under an activated shell,
+  `mise hook-env`'s stdout is exactly what gets `eval`'d on every prompt;
+  an unredirected `echo` from a child command showed up there as a
+  literal `command not found` error on the next prompt. The redirect has
+  to wrap the whole script in `{ ...; }` — a bare trailing `1>&2` on an
+  unwrapped multi-statement command only applies to its last statement,
+  not everything before it (confirmed by testing both forms).
+- The `env` table passed to `cmd.stream` is every resolved env var for the
   current branch (default + matching pattern + exact branch, already
-  merged) — verified empirically that mise's Lua `cmd.exec` *extends* the
-  child process's environment rather than replacing it, so `$PATH` and
-  everything else stays intact alongside the branch-specific vars.
+  merged) — verified empirically that mise's Lua `cmd.exec`/`cmd.stream`
+  *extend* the child process's environment rather than replacing it, so
+  `$PATH` and everything else stays intact alongside the branch-specific
+  vars.
 - Change detection: a small per-`head_path` marker file under
   `$TMPDIR/mise-git-branch-env-run-state/` (no TTL, unlike the `pass`
   cache) records the last branch seen; `_run` only fires when that differs
-  from the current branch. Verified directly: unchanged branch → no
-  re-exec; real `git checkout` → exactly one exec; a failing (`exit 1`) or
-  timed-out command still updates the marker, so it's never retried on
-  every subsequent prompt the way a stuck `pass`/`git` call used to be.
+  from the current branch. The marker is updated on every real branch
+  change regardless of whether the *new* branch defines `_run` - tracking
+  that independently of whether `_run` fired was itself a bug fix: without
+  it, bouncing through a branch with no `_run` (A -> B -> A, B undefined)
+  never touched the marker on B, so the return to A looked unchanged and
+  silently skipped a re-run that should have happened. Reading/writing
+  that marker at all is gated on `_run` being set *anywhere* in the config
+  (default/any pattern/any branch, not just the resolved block), so a
+  project that never uses it pays zero file I/O for this on every prompt.
+  Verified directly: unchanged branch → no re-exec; a real round trip
+  through a `_run`-less branch and back → exactly one re-exec on return; a
+  failing (`exit 1`) or timed-out command still updates the marker, so
+  it's never retried on every subsequent prompt the way a stuck
+  `pass`/`git` call used to be.
 - Hard 15-second timeout (`RUN_TIMEOUT_SECONDS`); failures and timeouts
   are silent (`MISE_DEBUG=1` to diagnose), same philosophy as `pass`.
 - Only evaluated inside a git repo — outside one there's no branch to key
