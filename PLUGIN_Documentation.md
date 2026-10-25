@@ -1,6 +1,6 @@
 # `git-branch-env` — mise Plugin Documentation
 
-**Author:** Francesco Abrusci | **Version:** 2.1.0
+**Author:** Francesco Abrusci | **Version:** 2.2.0
 
 A mise environment plugin that automatically sets environment variables based on the current git branch, enabling branch-aware configurations without any manual switching.
 
@@ -18,6 +18,8 @@ When mise loads the environment (on `cd`, shell startup, or branch switch), the 
 > **v2 note:** v1 shelled out to `git` up to 3 times per call. Since mise re-evaluates env on every shell prompt while inside the project, this meant 2-3 `git` forks per prompt — harmless on an idle host, but on a host already under process/thread pressure it became a self-feeding fork storm that froze the shell entirely. v2 needs zero subprocess forks for branch detection (verified by running with `git` absent from `PATH`). Behavior and configuration are unchanged — this is a drop-in upgrade.
 
 > **v2.1 note:** branch-switch pickup needed no extra wiring even before this change — v2's branch detection is cheap enough that it just runs on every hook-env evaluation, so a `git checkout`/`git switch` is already reflected on the next prompt. What v2.1 adds is that `MiseEnv` now returns `{ env, cacheable = true, watch_files = { head_path } }` instead of a bare array. `head_path` is the actual HEAD file resolved in step 1 above — under `.git/worktrees/<name>/` or `.git/modules/<name>/` when inside a worktree or submodule, not a hardcoded `.git/HEAD`. This is the shape mise's plugin docs describe for a hook that wants to opt into mise's own result caching (skip re-running the hook until the watched file changes); verified against mise 2026.10.18 to produce correct env vars with no regressions, though no skip-on-unchanged behavior was observable on that specific build (`MISE_DEBUG=1 mise env` still shows the hook running every call). It's a forward-compatible, zero-cost declaration either way. See [Automatic Reload on Branch Switch](#automatic-reload-on-branch-switch).
+
+> **v2.2 note:** adds the `_run` key — a command executed once per actual branch change, not every prompt, with that branch's resolved env vars available to it. See [Running a Command on Branch Change](#running-a-command-on-branch-change) for the mechanics and, importantly, the threat model: this is arbitrary command execution driven by `.mise.toml`.
 
 ---
 
@@ -152,28 +154,71 @@ independent of all of the above.
 
 ## Running a Command on Branch Change
 
-`MiseEnv` only returns environment variables — it cannot execute arbitrary
-commands. That's enough as long as the consumer reads an env var, but some
-tools read *persisted* state instead: e.g. the Pulumi CLI's "currently
-selected stack" lives in local workspace state, and a prompt plugin like
-oh-my-posh's Pulumi segment reads that state, not `$PULUMI_STACK`. For
-those, you need an actual command to run on branch change, not just a
-variable.
+Some tools read *persisted* state instead of env vars: e.g. the Pulumi
+CLI's "currently selected stack" lives in local workspace state, and a
+prompt plugin like oh-my-posh's Pulumi segment reads that state, not
+`$PULUMI_STACK`. For those, an env var isn't enough — you need an actual
+command to run on branch change.
 
-A `.mise.toml` `[[watch_files]]` block with a `run` script looks like the
-natural fit, and earlier revisions of this documentation suggested exactly
-that — **it does not work**. Verified directly: a scratch repo, a properly
-activated shell (`eval "$(mise activate bash)"`), a real `git checkout`
-between two branches, checked with and without an intervening `mise env`/
-`mise hook-env` call — the `run` script never fired. `watch_files`/
-`sources` only take effect inside `mise watch <task>`, which runs the task
-under `watchexec` and requires that process to keep running in a terminal.
+### `_run`
 
-The mechanism that does work, with zero background process and zero
-polling, is a plain git `post-checkout` hook — fired directly by git on
-every real branch checkout. Point it at this plugin's own resolved value
-via `mise env --json`, so the branch→value mapping is defined once (in
-`.mise.toml`) and reused, not duplicated in a shell script:
+Since v2.2, any `default`/`patterns.*`/`branches.*` block may set a
+reserved `_run` key:
+
+```toml
+[env._.git-branch-env.branches.main]
+PULUMI_STACK = "production"
+_run = "pulumi stack select $PULUMI_STACK"
+
+[env._.git-branch-env.branches.develop]
+PULUMI_STACK = "dev"
+_run = "pulumi stack select $PULUMI_STACK"
+```
+
+Mechanics:
+- `_run` follows the same priority/merge rule as any other key (highest
+  specificity among `default`/matching `patterns`/exact `branches` wins);
+  it is read and stripped before the rest of the block is turned into env
+  vars, so it's never exported itself.
+- Executed via `cmd.exec("sh -c " .. command, {...})` — a real shell, so
+  `&&`, `|`, `$VAR` expansion all work, unlike the fixed `pass show <path>`
+  invocation used for secrets.
+- The `env` table passed to `cmd.exec` is every resolved env var for the
+  current branch (default + matching pattern + exact branch, already
+  merged) — verified empirically that mise's Lua `cmd.exec` *extends* the
+  child process's environment rather than replacing it, so `$PATH` and
+  everything else stays intact alongside the branch-specific vars.
+- Change detection: a small per-`head_path` marker file under
+  `$TMPDIR/mise-git-branch-env-run-state/` (no TTL, unlike the `pass`
+  cache) records the last branch seen; `_run` only fires when that differs
+  from the current branch. Verified directly: unchanged branch → no
+  re-exec; real `git checkout` → exactly one exec; a failing (`exit 1`) or
+  timed-out command still updates the marker, so it's never retried on
+  every subsequent prompt the way a stuck `pass`/`git` call used to be.
+- Hard 15-second timeout (`RUN_TIMEOUT_SECONDS`); failures and timeouts
+  are silent (`MISE_DEBUG=1` to diagnose), same philosophy as `pass`.
+- Only evaluated inside a git repo — outside one there's no branch to key
+  the change check on, so `_run` (even on `default`) is simply skipped.
+- The marker directory/file get the same `0700`/`0600` hardening as the
+  `pass` cache, even though a branch name isn't secret — consistency, not
+  a security requirement here.
+
+**Threat model:** `_run` is arbitrary command execution driven by
+`.mise.toml`, a file that's normally committed to the repo. Anyone who
+clones a repo containing a `_run`-bearing `.mise.toml`, with mise shell
+integration active, runs that command the moment they `cd` in — no
+prompt, no confirmation. This is a materially larger attack surface than
+`{ pass = "..." }` (which can only read one named secret you already
+control access to, not run arbitrary code). Only use `_run` in `.mise.toml`
+files you don't share, or that you fully trust everyone with push access
+to.
+
+### Alternative: a git `post-checkout` hook
+
+If you'd rather not have an executable command living in `.mise.toml` at
+all (e.g. because that file *is* shared), get the same result with a git
+hook instead, still reusing this plugin's resolved value via
+`mise env --json` so the branch→value mapping stays defined once:
 
 ```bash
 # .git/hooks/post-checkout (chmod +x)
@@ -186,27 +231,23 @@ stack="$(mise env --json 2>/dev/null | jq -r '.PULUMI_STACK // empty')"
 exit 0
 ```
 
-```toml
-[env._.git-branch-env.branches.main]
-PULUMI_STACK = "production"
-
-[env._.git-branch-env.branches.develop]
-PULUMI_STACK = "dev"
-
-[env._.git-branch-env.patterns."feature/"]
-PULUMI_STACK = "dev"
-```
-
 Caveats:
-- `.git/hooks/` is local and untracked. For a team-shared hook, set
-  `core.hooksPath` to a committed directory, or use a hook manager
-  (lefthook, pre-commit, husky, ...).
-- `mise watch <task>` (with `sources = [".git/HEAD"]`) is a valid
-  alternative if you're fine with a dedicated terminal/pane staying open
-  for an inotify-driven watcher — it's not zero-process like a git hook,
-  but it does work.
-- Not Pulumi-specific: the same `git hook + mise env --json + jq` pattern
-  applies to any tool needing an imperative action instead of an env var.
+- `.git/hooks/` is local and untracked — that's the point here: nothing
+  executable ends up in a file someone else might clone. For a
+  team-shared hook, set `core.hooksPath` to a committed directory, or use
+  a hook manager (lefthook, pre-commit, husky, ...).
+- A `.mise.toml` `[[watch_files]]` block with a `run` script looks like it
+  should also achieve this, and an earlier revision of this documentation
+  suggested it — **it does not work**: verified directly with a scratch
+  repo under a properly activated shell (`eval "$(mise activate bash)"`),
+  a real `git checkout` between two branches, checked with and without an
+  intervening `mise env`/`mise hook-env` call — the `run` script never
+  fired. `watch_files`/`sources` only take effect inside `mise watch
+  <task>`, which runs the task under `watchexec` and requires that
+  process to keep running in a terminal — a valid option too if that
+  tradeoff is acceptable.
+- Neither this nor `_run` is Pulumi-specific — both apply to any tool
+  needing an imperative action instead of an env var read.
 
 ---
 

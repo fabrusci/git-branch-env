@@ -17,6 +17,14 @@
 -- git post-checkout hook, a wrapping `git` shell function) unnecessary:
 -- mise now watches the right file on its own, including for worktrees and
 -- submodules where it is not literally ".git/HEAD".
+--
+-- v2.2: a block (default/pattern/branch) may set a reserved `_run` key -
+-- a shell command executed once per *actual* branch change (tracked in a
+-- small state file, same idea as the `pass` cache but without a TTL), with
+-- every resolved env var for that branch available to it via $VAR. This is
+-- arbitrary command execution driven by .mise.toml: see the README section
+-- "Running a command on branch change" for the threat model before using
+-- it on a repo whose config you don't fully trust.
 
 local file = require("file")
 local cmd = require("cmd")
@@ -24,6 +32,9 @@ local cmd = require("cmd")
 local PASS_TIMEOUT_SECONDS = 5
 local PASS_CACHE_TTL_SECONDS = 5
 local PASS_CACHE_DIR = (os.getenv("TMPDIR") or "/tmp") .. "/mise-git-branch-env-pass-cache"
+
+local RUN_TIMEOUT_SECONDS = 15
+local RUN_STATE_DIR = (os.getenv("TMPDIR") or "/tmp") .. "/mise-git-branch-env-run-state"
 
 -- POSIX single-quote escaping: wraps `s` so it is passed to /bin/sh as one
 -- literal argument, regardless of its content (spaces, `"`, `$`, backticks,
@@ -155,6 +166,60 @@ local function resolve_pass_secret(secret_path)
     return value
 end
 
+-- Keyed by head_path (unique per repo/worktree) so each worktree tracks its
+-- own "last branch seen" independently, same reasoning as watch_files.
+local function run_state_path(head_path)
+    local safe = head_path:gsub("[^%w]", "_")
+    return file.join_path(RUN_STATE_DIR, safe)
+end
+
+local function read_last_branch(head_path)
+    local f = io.open(run_state_path(head_path), "r")
+    if not f then return nil end
+    local branch = f:read("*l")
+    f:close()
+    return branch
+end
+
+local function write_last_branch(head_path, branch)
+    local quoted_dir = shell_quote(RUN_STATE_DIR)
+    os.execute('mkdir -p -m 700 ' .. quoted_dir .. ' 2>/dev/null && chmod 700 ' .. quoted_dir .. ' 2>/dev/null')
+
+    local path = run_state_path(head_path)
+    local f = io.open(path, "w")
+    if f then
+        f:write(tostring(branch) .. "\n")
+        f:close()
+        os.execute('chmod 600 ' .. shell_quote(path) .. ' 2>/dev/null')
+    end
+end
+
+local function env_entries_to_table(entries)
+    local t = {}
+    for _, entry in ipairs(entries) do
+        t[entry.key] = entry.value
+    end
+    return t
+end
+
+-- Runs `command` through a real shell (so $VARS, &&, pipes etc. all work)
+-- with every resolved env var for this branch available to it, but only
+-- once per actual branch change - never on every prompt. Best-effort: a
+-- failing or timed-out command is silently skipped either way (same
+-- philosophy as `pass`), and the "last seen" marker is updated regardless
+-- so a broken command doesn't get retried on every single prompt.
+local function run_on_branch_change(head_path, current_branch, command, resolved_env)
+    if not command then return end
+    if read_last_branch(head_path) == current_branch then return end
+
+    pcall(cmd.exec, "sh -c " .. shell_quote(command), {
+        env = env_entries_to_table(resolved_env),
+        timeout = RUN_TIMEOUT_SECONDS,
+    })
+
+    write_last_branch(head_path, current_branch)
+end
+
 function PLUGIN:MiseEnv(ctx)
     local config = ctx.options or {}
     local branches = config.branches or {}
@@ -189,27 +254,35 @@ function PLUGIN:MiseEnv(ctx)
         return a.specificity < b.specificity
     end)
 
+    -- `_run` is a reserved key, not an env var: the highest-priority block
+    -- that sets it wins (same "later overwrites earlier" rule as any other
+    -- key, since applicable_configs is sorted lowest-to-highest priority).
+    local run_command = nil
     for _, config_item in ipairs(applicable_configs) do
         for key, value in pairs(config_item.env) do
-            local final_value
-            if type(value) == "table" and value.pass then
-                final_value = resolve_pass_secret(value.pass)
+            if key == "_run" then
+                run_command = tostring(value)
             else
-                final_value = tostring(value)
-            end
-            if final_value ~= nil then
-                table.insert(env_vars, { key = key, value = final_value })
+                local final_value
+                if type(value) == "table" and value.pass then
+                    final_value = resolve_pass_secret(value.pass)
+                else
+                    final_value = tostring(value)
+                end
+                if final_value ~= nil then
+                    table.insert(env_vars, { key = key, value = final_value })
+                end
             end
         end
     end
 
     -- head_path is only set when we're inside a git repo (see
-    -- get_current_branch). Declaring it as the watched file lets mise skip
-    -- re-running this hook on every prompt and only do so when the branch
-    -- actually changes; outside a git repo there is nothing branch-related
-    -- to watch, so the hook keeps running every time as before (it's cheap:
-    -- just the `default` config block, no git I/O).
+    -- get_current_branch). Outside a git repo there is nothing branch-
+    -- related to key `_run`'s change-detection or the watch_files hint on,
+    -- so both are skipped (the hook keeps running every time as before -
+    -- it's cheap: just the `default` config block, no git I/O).
     if head_path then
+        run_on_branch_change(head_path, current_branch, run_command, env_vars)
         return { env = env_vars, cacheable = true, watch_files = { head_path } }
     end
     return { env = env_vars }

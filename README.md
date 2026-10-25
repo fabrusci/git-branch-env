@@ -185,27 +185,55 @@ version, confirm env vars are still set after upgrading this plugin
 
 ## Running a command on branch change (not just reading an env var)
 
-This plugin only sets environment variables - it never executes arbitrary
-commands. That's enough for most uses (a tool that reads `$DATABASE_URL`,
-`$API_ENV`, etc.), but sometimes you need an actual side effect, e.g.
+Sometimes an env var isn't enough - you need an actual side effect, e.g.
 selecting a Pulumi stack so a prompt plugin like oh-my-posh (which reads
 Pulumi's locally *persisted* selected-stack state, not env vars) shows the
 right one.
 
-A `.mise.toml` `[[watch_files]]` block with a `run` script looks like the
-obvious tool for this, and older docs (including an earlier version of this
-one) suggested it - **but it doesn't work**: verified by hand against mise
-2026.10.18, under a properly activated shell, with a real `git checkout`
-in between - the `run` script never fires, with or without an intervening
-`mise env`/prompt. `watch_files`/`sources` only do something inside
-`mise watch <task>`, which needs a long-running `watchexec`-backed process
-in a dedicated terminal.
+### `_run`: a command per branch, executed by the plugin itself
 
-The reliable, genuinely zero-overhead mechanism is a plain git
-`post-checkout` hook, which fires exactly once per real branch checkout -
-no polling, no background process. Reuse this plugin's own branch-to-value
-resolution as the single source of truth instead of duplicating it in the
-hook:
+Any `default`/`branches.*`/`patterns.*` block can set a reserved `_run`
+key - a shell command run once per *actual* branch change (tracked in a
+small on-disk marker, no TTL), with every resolved env var for that branch
+available to it:
+
+```toml
+[env._.git-branch-env.branches.main]
+PULUMI_STACK = "production"
+_run = "pulumi stack select $PULUMI_STACK"
+
+[env._.git-branch-env.branches.develop]
+PULUMI_STACK = "dev"
+_run = "pulumi stack select $PULUMI_STACK"
+```
+
+- `_run` is never exported as an env var itself; it just reads whatever
+  else the same block (and lower-priority ones) set, same priority rules
+  as everything else (`default` -> `patterns` -> `branches`).
+- Runs through a real shell (`sh -c`), so `&&`, pipes, `$VAR` expansion all
+  work - unlike `{ pass = "..." }`, which only runs one fixed command.
+- Hard 15s timeout; a failing or hanging command is skipped silently
+  (same philosophy as `pass` - diagnose with `MISE_DEBUG=1`) and never
+  retried on the same branch, so a broken command can't turn into "hangs
+  every prompt" the way v1's `git` forking did.
+- Only takes effect inside a git repo (there's no branch to key the
+  "did it change" check on otherwise).
+
+**Read this before using it:** `_run` is arbitrary command execution
+triggered by `.mise.toml`, which is typically committed to the repo. If
+you push this file to a shared or public repository, anyone who clones it
+and has mise shell integration active runs whatever `_run` says the moment
+they `cd` in, with no prompt. Treat a `_run`-bearing `.mise.toml` the same
+way you'd treat a `post-checkout` hook with write access to your machine -
+fine for a personal/private repo you fully control, risky for anything you
+share.
+
+### Alternative: a git `post-checkout` hook
+
+If you don't want an executable command living in a (possibly shared)
+`.mise.toml`, the same result without touching this plugin's config is a
+plain git hook - it still reuses this plugin's resolved value via
+`mise env --json`, so the branch-to-value mapping stays defined once:
 
 ```bash
 # .git/hooks/post-checkout (chmod +x)
@@ -218,30 +246,23 @@ stack="$(mise env --json 2>/dev/null | jq -r '.PULUMI_STACK // empty')"
 exit 0
 ```
 
-with, e.g.:
-
-```toml
-[env._.git-branch-env.branches.main]
-PULUMI_STACK = "production"
-
-[env._.git-branch-env.branches.develop]
-PULUMI_STACK = "dev"
-
-[env._.git-branch-env.patterns."feature/"]
-PULUMI_STACK = "dev"
-```
-
 Notes:
-- `.git/hooks/` isn't version-controlled. To share this with a team, point
-  `core.hooksPath` at a tracked directory (e.g. `.githooks/`) instead, or
-  use a hook manager (`lefthook`, `pre-commit`, husky, ...).
-- If you'd rather stay inside the mise ecosystem and don't mind a
-  dedicated terminal/pane staying open, `mise watch <task>` (with
-  `sources = [".git/HEAD"]` on the task) does work - it's inotify-driven
-  via `watchexec`, just not "zero processes" the way a git hook is.
-- This isn't specific to Pulumi: the same pattern (git hook + `mise env
-  --json` + `jq`) applies to any tool that needs an imperative switch
-  instead of an env var read.
+- `.git/hooks/` isn't version-controlled either way - that's the point
+  here: nothing executable ends up in a file someone else might clone. To
+  share it deliberately with a team, point `core.hooksPath` at a tracked
+  directory (e.g. `.githooks/`) instead, or use a hook manager (`lefthook`,
+  `pre-commit`, husky, ...).
+- A `.mise.toml` `[[watch_files]]` block with a `run` script looks like it
+  should also work for this, and older docs (including an earlier version
+  of this one) suggested it - **it doesn't**: verified by hand against
+  mise 2026.10.18, under a properly activated shell, with a real `git
+  checkout` in between - the `run` script never fired, with or without an
+  intervening `mise env`/prompt. `watch_files`/`sources` only do something
+  inside `mise watch <task>`, which needs a long-running
+  `watchexec`-backed process in a dedicated terminal - a valid option too
+  if you're fine with that tradeoff.
+- Neither mechanism is Pulumi-specific - both apply to any tool that needs
+  an imperative switch instead of an env var read.
 
 ## Usage
 
