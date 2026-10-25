@@ -109,6 +109,34 @@ mise plugin ls
 # Should show: git-branch-env
 ```
 
+### 5. (Optional) Scaffold a `mise.toml` for you
+
+Instead of writing `[env._.git-branch-env.*]` by hand, install the
+scaffolding task once:
+
+```bash
+mkdir -p ~/.config/mise/tasks/scaffold
+cp scaffold/git-branch-env ~/.config/mise/tasks/scaffold/
+chmod +x ~/.config/mise/tasks/scaffold/git-branch-env
+```
+
+Then, from any project you want to configure:
+
+```bash
+mise run scaffold:git-branch-env
+```
+
+This appends a fully-commented block to that project's `mise.toml` (or
+`.mise.toml`) covering every option - `default`, exact `branches`,
+prefix/glob `patterns`, `pass` secrets, `_run`, and the `[hooks]`
+enter/leave caveats - all commented out except `default`/`main`/`develop`,
+ready to uncomment and adapt. Safe to re-run: it's a no-op (with a note on
+stderr) if the project's `mise.toml` already has a `[env._.git-branch-env]`
+block, and never creates a second `[settings]` table if one already exists
+(it just tells you to add `experimental = true` to it yourself if that key
+is missing). This follows mise's own [scaffolding task
+pattern](https://mise.jdx.dev/mise-cookbook/presets.html).
+
 ## Configuration
 
 Add configuration to your project's `.mise.toml` or `mise.toml`:
