@@ -183,6 +183,66 @@ skip-on-unchanged behavior either). If you're on a very different mise
 version, confirm env vars are still set after upgrading this plugin
 (`mise env`) before relying on it.
 
+## Running a command on branch change (not just reading an env var)
+
+This plugin only sets environment variables - it never executes arbitrary
+commands. That's enough for most uses (a tool that reads `$DATABASE_URL`,
+`$API_ENV`, etc.), but sometimes you need an actual side effect, e.g.
+selecting a Pulumi stack so a prompt plugin like oh-my-posh (which reads
+Pulumi's locally *persisted* selected-stack state, not env vars) shows the
+right one.
+
+A `.mise.toml` `[[watch_files]]` block with a `run` script looks like the
+obvious tool for this, and older docs (including an earlier version of this
+one) suggested it - **but it doesn't work**: verified by hand against mise
+2026.10.18, under a properly activated shell, with a real `git checkout`
+in between - the `run` script never fires, with or without an intervening
+`mise env`/prompt. `watch_files`/`sources` only do something inside
+`mise watch <task>`, which needs a long-running `watchexec`-backed process
+in a dedicated terminal.
+
+The reliable, genuinely zero-overhead mechanism is a plain git
+`post-checkout` hook, which fires exactly once per real branch checkout -
+no polling, no background process. Reuse this plugin's own branch-to-value
+resolution as the single source of truth instead of duplicating it in the
+hook:
+
+```bash
+# .git/hooks/post-checkout (chmod +x)
+#!/usr/bin/env bash
+# $3 = 1 only for a branch checkout (0 for a single-file checkout)
+[ "$3" = "1" ] || exit 0
+
+stack="$(mise env --json 2>/dev/null | jq -r '.PULUMI_STACK // empty')"
+[ -n "$stack" ] && pulumi stack select "$stack" 2>/dev/null
+exit 0
+```
+
+with, e.g.:
+
+```toml
+[env._.git-branch-env.branches.main]
+PULUMI_STACK = "production"
+
+[env._.git-branch-env.branches.develop]
+PULUMI_STACK = "dev"
+
+[env._.git-branch-env.patterns."feature/"]
+PULUMI_STACK = "dev"
+```
+
+Notes:
+- `.git/hooks/` isn't version-controlled. To share this with a team, point
+  `core.hooksPath` at a tracked directory (e.g. `.githooks/`) instead, or
+  use a hook manager (`lefthook`, `pre-commit`, husky, ...).
+- If you'd rather stay inside the mise ecosystem and don't mind a
+  dedicated terminal/pane staying open, `mise watch <task>` (with
+  `sources = [".git/HEAD"]` on the task) does work - it's inotify-driven
+  via `watchexec`, just not "zero processes" the way a git hook is.
+- This isn't specific to Pulumi: the same pattern (git hook + `mise env
+  --json` + `jq`) applies to any tool that needs an imperative switch
+  instead of an env var read.
+
 ## Usage
 
 ### Automatic Environment Loading
