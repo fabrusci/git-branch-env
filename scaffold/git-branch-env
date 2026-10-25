@@ -137,8 +137,8 @@ LOG_LEVEL = "debug"
 # mise feature, not part of this plugin):
 #
 # [hooks]
-# enter = "pulumi stack select \"$(mise env --json | jq -r '.PULUMI_STACK // empty')\""
-# leave = "pulumi stack select default 2>/dev/null || true"
+#   enter = "echo \"entering branch $GIT_BRANCH, app=$APP_ENV\""
+#   leave = "echo \"leaving branch $GIT_BRANCH, app=$APP_ENV\""
 #
 # Two things that look obvious but aren't:
 # - Quote the INNER shell command with \" not ' - the TOML string's own
@@ -147,9 +147,18 @@ LOG_LEVEL = "debug"
 #   prints the literal text "$GIT_BRANCH", not the branch name).
 # - `leave` can NEVER read this plugin's resolved vars, not via $VAR and
 #   not via `mise env --json` - by the time it runs, mise already treats
-#   the shell as outside the project. Hardcode what `leave` should do
-#   (like "default" above), or capture a value to a file during `enter`
-#   and have `leave` read that file back.
+#   the shell as outside the project. $GIT_BRANCH/$APP_ENV in the `leave`
+#   example above WILL come back empty - that's expected, not a bug.
+#   Hardcode what `leave` should do, or capture a value to a file during
+#   `enter` and have `leave` read that file back, instead of relying on
+#   it seeing a project var.
+#
+# For something that actually needs the resolved value (e.g. selecting a
+# Pulumi stack so oh-my-posh's Pulumi segment shows the right one):
+#
+# [hooks]
+#   enter = "pulumi stack select \"$(mise env --json | jq -r '.PULUMI_STACK // empty')\""
+#   leave = "pulumi stack select default 2>/dev/null || true"
 EOF
 
 echo "Added git-branch-env scaffolding to $TOML (edit it, uncomment what you need)." >&2
