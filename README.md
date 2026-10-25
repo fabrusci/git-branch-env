@@ -32,6 +32,33 @@ re-invoked on every single prompt.
 Behavior (default/patterns/branches priority, wildcard patterns, `GIT_BRANCH`
 /`GIT_BRANCH_SAFE`, `pass` secrets) is unchanged - this is a drop-in upgrade.
 
+## v2.1: branch-change detection, without the manual plumbing
+
+Turns out the old "Automatic Branch Switching" section below (documented
+since v1) was solving a problem v2 had already fixed: since v2's branch
+detection is a couple of file reads instead of 2-3 `git` forks, mise
+re-running the hook on every single shell prompt was already cheap enough
+that branch switches were picked up automatically, with no `watch_files`
+block, git hook, or shell wrapper needed - the README just never said so,
+and kept pointing people at a workaround for a problem that no longer
+existed. Verified by hand: `git checkout`-ing between two branches with
+different `[env._.git-branch-env.branches.*]` blocks updates `$API_ENV`
+etc. on the very next `mise env`/prompt, no extra config.
+
+On top of that, `MiseEnv` now also returns `watch_files = { head_path }`
+(the actual resolved HEAD file - `.git/HEAD`, or the per-worktree/
+per-submodule one under `.git/worktrees/<name>/HEAD` /
+`.git/modules/<name>/HEAD`) and `cacheable = true`. This is the shape mise's
+docs describe for letting a plugin opt its env hook into mise's own
+caching, so a future (or different) mise build can skip re-running this
+hook when the branch hasn't changed, instead of always re-running it as
+today. On the mise version this was developed against (2026.10.18), that
+skip wasn't observable - `MISE_DEBUG=1 mise env` still shows the hook
+running on every call - but declaring it correctly costs nothing, is
+forward-compatible, and is strictly more correct than the hardcoded
+`.git/HEAD` the old watch_files example used (which is the wrong file
+inside a worktree or submodule).
+
 ## Installation
 
 ### 1. Create Plugin Directory
@@ -129,103 +156,32 @@ DEBUG = "false"
 
 ## Automatic Branch Switching
 
-To make mise automatically reload environment variables when you switch git branches, use mise's `watch_files` configuration.
-
-### Setup: Add Watch Configuration
-
-Add this to your `.mise.toml`:
-
-```toml
-# Watch the git HEAD file for branch changes
-[[watch_files]]
-patterns = [".git/HEAD"]
-run = """
-#!/usr/bin/env bash
-echo '⏳ Updating git branch environment...'
-echo '☑️ Done!'
-"""
-
-[env._.git-branch-env.branches.main]
-DATABASE_URL = "postgresql://localhost/prod"
-API_ENV = "production"
-
-[env._.git-branch-env.branches.develop]
-DATABASE_URL = "postgresql://localhost/dev"
-API_ENV = "development"
-```
-
-The `[[watch_files]]` section tells mise to:
-- Monitor `.git/HEAD` for changes (which happens when you switch branches)
-- Run the specified script when changes are detected
-- Automatically reload the environment
-
-### How it works
-
-1. You run `git checkout develop` or `git switch feature/new-ui`
-2. Git updates `.git/HEAD` to point to the new branch
-3. Mise detects the file change
-4. Mise runs the watch script (optional feedback)
-5. Mise automatically reloads environment variables from the plugin
-
-### Testing the automatic reload
+No setup needed. mise re-evaluates the environment on every shell prompt
+(or every `mise env`), and this plugin's branch detection is cheap enough
+(no `git` subprocess) to just run every time, so a branch switch shows up
+immediately with zero extra configuration:
 
 ```bash
-# Initial branch
 git checkout main
-echo $API_ENV  # Shows: production
+echo $API_ENV  # production
 
-# Switch branch - environment reloads automatically!
 git checkout develop
-# Output: ⏳ Updating git branch environment...
-#         ☑️ Done!
-echo $API_ENV  # Shows: development (automatically updated!)
+echo $API_ENV  # development - picked up on the very next prompt
 ```
 
-### Optional: Watch Multiple Files
+`{ pass = "..." }` secrets keep following the TTL rule described above
+(cached for up to 5s, independent of branch switching): if you rotate a
+secret in `pass`, the new value shows up within 5 seconds either way.
 
-You can watch additional files that might affect your environment:
-
-```toml
-[[watch_files]]
-patterns = [".git/HEAD", ".env.local", "config/*.yml"]
-run = """
-#!/usr/bin/env bash
-echo '⏳ Environment updated!'
-"""
-```
-
-### Alternative Methods
-
-If you prefer not to use watch_files:
-
-**Option 1: Git Post-Checkout Hook**
-
-Create `.git/hooks/post-checkout`:
-```bash
-#!/bin/bash
-if command -v mise &> /dev/null; then
-    touch .mise.toml
-fi
-```
-
-**Option 2: Shell Function**
-
-Add to `~/.zshrc`:
-```bash
-git() {
-    command git "$@"
-    local git_result=$?
-    if [[ $git_result -eq 0 ]] && [[ "$1" =~ ^(checkout|switch)$ ]]; then
-        [[ -f ".mise.toml" ]] && touch .mise.toml
-    fi
-    return $git_result
-}
-```
-
-**Option 3: Manual Reload**
-```bash
-cd .  # Trigger mise hook
-```
+**Compatibility note:** `MiseEnv` also returns `watch_files`/`cacheable`
+hints pointing at the real resolved HEAD file (correct for worktrees and
+submodules, unlike a hardcoded `.git/HEAD`), for mise builds that use them
+to skip re-running this hook when the branch hasn't changed - this is the
+return shape mise's own plugin docs describe, verified not to break
+anything on mise 2026.10.18 (env vars are set correctly; no observable
+skip-on-unchanged behavior either). If you're on a very different mise
+version, confirm env vars are still set after upgrading this plugin
+(`mise env`) before relying on it.
 
 ## Usage
 

@@ -8,6 +8,15 @@
 -- only remaining subprocess call: it now has a hard timeout (a stuck
 -- gpg-agent/pinentry can no longer hang the shell forever) and a short TTL
 -- cache so it isn't re-invoked on every single prompt.
+--
+-- v2.1: MiseEnv now returns { env, cacheable = true, watch_files = {head} },
+-- mise's own hook-caching mechanism. mise re-runs this whole hook (branch
+-- detection, pattern/priority merge, `pass` lookups) only when the resolved
+-- HEAD file actually changes, instead of on every single shell prompt -
+-- making the README's old workarounds (manual [[watch_files]] block, a
+-- git post-checkout hook, a wrapping `git` shell function) unnecessary:
+-- mise now watches the right file on its own, including for worktrees and
+-- submodules where it is not literally ".git/HEAD".
 
 local file = require("file")
 local cmd = require("cmd")
@@ -60,19 +69,25 @@ local function find_git_dir(start_dir)
     return nil
 end
 
+-- Returns (branch, head_path). head_path is the actual HEAD file that was
+-- read - under .git/worktrees/<name>/ for a worktree, .git/modules/<name>/
+-- for a submodule, following find_git_dir's gitdir: resolution - so the
+-- caller can watch the file that genuinely changes on checkout, not a
+-- hardcoded ".git/HEAD" that doesn't exist for those cases.
 local function get_current_branch(start_dir)
     local git_dir = find_git_dir(start_dir or ".")
-    if not git_dir then return nil end
+    if not git_dir then return nil, nil end
 
-    local head = read_file(file.join_path(git_dir, "HEAD"))
-    if not head then return nil end
+    local head_path = file.join_path(git_dir, "HEAD")
+    local head = read_file(head_path)
+    if not head then return nil, nil end
 
     local branch = head:match("^ref:%s*refs/heads/(.-)%s*$")
-    if branch then return branch end
+    if branch then return branch, head_path end
 
     -- Detached HEAD: mirror v1's behaviour (`git rev-parse --abbrev-ref HEAD`
     -- prints the literal string "HEAD" in this case).
-    return "HEAD"
+    return "HEAD", head_path
 end
 
 local function sanitize_branch_name(branch)
@@ -146,7 +161,7 @@ function PLUGIN:MiseEnv(ctx)
     local patterns = config.patterns or {}
     local default_env = config.default or {}
 
-    local current_branch = get_current_branch(ctx.config_root or ".")
+    local current_branch, head_path = get_current_branch(ctx.config_root or ".")
 
     local env_vars = {}
     -- Priority 0=default, 1=pattern, 2=exact branch (same semantics as v1).
@@ -188,5 +203,14 @@ function PLUGIN:MiseEnv(ctx)
         end
     end
 
-    return env_vars
+    -- head_path is only set when we're inside a git repo (see
+    -- get_current_branch). Declaring it as the watched file lets mise skip
+    -- re-running this hook on every prompt and only do so when the branch
+    -- actually changes; outside a git repo there is nothing branch-related
+    -- to watch, so the hook keeps running every time as before (it's cheap:
+    -- just the `default` config block, no git I/O).
+    if head_path then
+        return { env = env_vars, cacheable = true, watch_files = { head_path } }
+    end
+    return { env = env_vars }
 end

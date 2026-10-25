@@ -1,6 +1,6 @@
 # `git-branch-env` — mise Plugin Documentation
 
-**Author:** Francesco Abrusci | **Version:** 2.0.0
+**Author:** Francesco Abrusci | **Version:** 2.1.0
 
 A mise environment plugin that automatically sets environment variables based on the current git branch, enabling branch-aware configurations without any manual switching.
 
@@ -16,6 +16,8 @@ When mise loads the environment (on `cd`, shell startup, or branch switch), the 
 4. Exports the resulting variables into the shell environment
 
 > **v2 note:** v1 shelled out to `git` up to 3 times per call. Since mise re-evaluates env on every shell prompt while inside the project, this meant 2-3 `git` forks per prompt — harmless on an idle host, but on a host already under process/thread pressure it became a self-feeding fork storm that froze the shell entirely. v2 needs zero subprocess forks for branch detection (verified by running with `git` absent from `PATH`). Behavior and configuration are unchanged — this is a drop-in upgrade.
+
+> **v2.1 note:** branch-switch pickup needed no extra wiring even before this change — v2's branch detection is cheap enough that it just runs on every hook-env evaluation, so a `git checkout`/`git switch` is already reflected on the next prompt. What v2.1 adds is that `MiseEnv` now returns `{ env, cacheable = true, watch_files = { head_path } }` instead of a bare array. `head_path` is the actual HEAD file resolved in step 1 above — under `.git/worktrees/<name>/` or `.git/modules/<name>/` when inside a worktree or submodule, not a hardcoded `.git/HEAD`. This is the shape mise's plugin docs describe for a hook that wants to opt into mise's own result caching (skip re-running the hook until the watched file changes); verified against mise 2026.10.18 to produce correct env vars with no regressions, though no skip-on-unchanged behavior was observable on that specific build (`MISE_DEBUG=1 mise env` still shows the hook running every call). It's a forward-compatible, zero-cost declaration either way. See [Automatic Reload on Branch Switch](#automatic-reload-on-branch-switch).
 
 ---
 
@@ -128,18 +130,23 @@ This is the only subprocess the plugin still spawns. Since v2, it's bounded by a
 
 ## Automatic Reload on Branch Switch
 
-Add a `watch_files` block to trigger a mise reload whenever `.git/HEAD` changes (i.e., on every `git checkout` / `git switch`):
+No `.mise.toml` configuration required, and never has been since v2: mise
+re-evaluates this hook on every prompt/`mise env` call, and branch
+detection is cheap (no `git` subprocess), so `git checkout` / `git switch`
+is reflected on the very next evaluation — including inside a worktree or
+submodule, since branch detection already resolves the correct per-
+worktree/per-submodule HEAD file.
 
-```toml
-[[watch_files]]
-patterns = [".git/HEAD"]
-run = """
-#!/usr/bin/env bash
-echo '⏳ Updating environment for branch: '$(git branch --show-current)
-"""
-```
+v2.1 additionally declares that resolved HEAD file as `watch_files` with
+`cacheable = true` (see the v2.1 note above), so that a mise build which
+implements hook-result caching can skip re-running this hook entirely
+until the branch actually changes. `{ pass = "..." }` secrets are
+unaffected either way — they keep following the 5s TTL cache described
+above, regardless of branch switches.
 
-mise detects the file change, re-evaluates the plugin, and updates all variables automatically.
+Edits to `.mise.toml` itself (adding/changing a `branches`/`patterns`/
+`default` block) are picked up by mise's own config-file watching,
+independent of all of the above.
 
 ---
 
@@ -184,6 +191,11 @@ git branch --show-current
 
 # Prove branch detection needs zero `git` forks (sanity check after any change)
 env PATH=/nonexistent mise env
+
+# Confirm the hook is actually being cached/skipped between prompts
+# (look for the plugin's hook execution log line; it should NOT appear on
+# a second `mise env` run with the branch unchanged)
+MISE_DEBUG=1 mise env 2>&1 | grep -i git-branch-env
 ```
 
 ---
