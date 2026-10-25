@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+#MISE description="Add a fully-commented git-branch-env config block to the current project's mise.toml"
+#MISE dir="{{cwd}}"
+set -euo pipefail
+
+# Install: mkdir -p ~/.config/mise/tasks/scaffold && cp scaffold/git-branch-env ~/.config/mise/tasks/scaffold/ && chmod +x ~/.config/mise/tasks/scaffold/git-branch-env
+# Run:     mise run scaffold:git-branch-env
+#
+# Appends a heavily-commented [env._.git-branch-env.*] block (every option
+# this plugin supports) to the mise.toml in the directory you invoke it
+# from. Idempotent: if git-branch-env config is already present, does
+# nothing rather than risk a duplicate/conflicting block; same for
+# [settings] if one already exists (TOML doesn't allow two [settings]
+# tables, and this script can't know where to inject a missing
+# `experimental = true` into an existing one, so it just tells you).
+
+TOML="mise.toml"
+if [ ! -f "$TOML" ] && [ -f ".mise.toml" ]; then
+    TOML=".mise.toml"
+fi
+touch "$TOML"
+
+if grep -q '^\[settings\]' "$TOML"; then
+    if ! grep -q 'experimental[[:space:]]*=[[:space:]]*true' "$TOML"; then
+        echo "note: $TOML already has a [settings] table without experimental = true -" >&2
+        echo "      add that key to it by hand (this plugin's Lua hook API needs it)." >&2
+    fi
+else
+    cat >> "$TOML" <<'EOF'
+
+[settings]
+# Required: this plugin uses mise's Lua/vfox hook API.
+experimental = true
+EOF
+fi
+
+if grep -q '^\[env\._\.git-branch-env\]' "$TOML"; then
+    echo "note: $TOML already has a [env._.git-branch-env] block - leaving it alone." >&2
+    exit 0
+fi
+
+cat >> "$TOML" <<'EOF'
+
+# =============================================================================
+# git-branch-env - sets env vars (and optionally runs a command) based on
+# the current git branch. Full docs: https://github.com/fabrusci/git-branch-env
+#
+# Priority (lowest -> highest): default -> patterns (longer pattern wins on
+# overlap) -> branches (exact match). Later values are what the shell
+# actually sees; a lower-priority value survives on any key the winning
+# block doesn't redefine.
+# =============================================================================
+[env._.git-branch-env]
+
+# --- default: applied to every branch, and even outside a git repo -------
+[env._.git-branch-env.default]
+APP_ENV = "development"
+LOG_LEVEL = "info"
+
+# --- branches.<name>: exact match, highest priority ------------------------
+[env._.git-branch-env.branches.main]
+APP_ENV = "production"
+LOG_LEVEL = "warn"
+# DATABASE_URL = "postgresql://prod-db:5432/myapp"
+
+[env._.git-branch-env.branches.develop]
+APP_ENV = "development"
+LOG_LEVEL = "debug"
+# DATABASE_URL = "postgresql://dev-db:5432/myapp"
+
+# An exact branch match overrides a pattern match's keys one by one - keys
+# the exact block doesn't set still come from the pattern below. E.g. here
+# LOG_LEVEL="trace" wins over the "feature/" pattern's "debug", but
+# FEATURE_FLAG (set only by the pattern, not here) still applies.
+# [env._.git-branch-env.branches."feature/experimental"]
+# LOG_LEVEL = "trace"
+
+# --- patterns.<pattern>: prefix match (branch starts with this string) ----
+# [env._.git-branch-env.patterns."feature/"]
+# APP_ENV = "feature"
+# LOG_LEVEL = "debug"
+# FEATURE_FLAG = "true"
+
+# [env._.git-branch-env.patterns."bugfix/"]
+# APP_ENV = "bugfix"
+# LOG_LEVEL = "debug"
+
+# [env._.git-branch-env.patterns."hotfix/"]
+# APP_ENV = "hotfix"
+# LOG_LEVEL = "warn"
+
+# --- patterns.<pattern*>: glob match (pattern ends with *) -----------------
+# A pattern string ending in "*" is a glob instead of a literal prefix, so
+# "feat*" also matches e.g. "feat-quick", not just "feature/...". When a
+# branch matches more than one pattern, the LONGEST pattern string wins -
+# "feature/" (8 chars) beats "feat*" (5 chars) on branch "feature/x".
+# [env._.git-branch-env.patterns."feat*"]
+# APP_ENV = "development"
+
+# --- secrets via `pass` (https://www.passwordstore.org/) ------------------
+# Use { pass = "path/in/your/store" } instead of a plain string; the
+# plugin runs `pass show <path>` (5s timeout, 5s TTL cache) and uses the
+# result as the value. Silently skipped if `pass`/the entry is missing -
+# diagnose with `MISE_DEBUG=1 mise env`.
+# [env._.git-branch-env.branches.main]
+# DATABASE_PASSWORD = { pass = "myapp/prod/db-password" }
+# API_KEY            = { pass = "myapp/prod/api-key" }
+
+# --- _run: a command executed once per ACTUAL branch change ---------------
+# Not an env var read - an env var isn't enough for a tool that keeps its
+# own persisted state (e.g. Pulumi's "currently selected stack", which a
+# prompt plugin like oh-my-posh's Pulumi segment reads directly, not
+# $PULUMI_STACK). `_run` fires once per real branch change (tracked in a
+# small marker file, not on every prompt), through a real shell (&&, pipes,
+# $VAR all work), with every resolved var for that branch visible to it.
+# Reentrancy-safe if the command itself invokes another mise-managed tool
+# (e.g. a `pulumi` shim resolving its own version re-enters mise's env
+# resolution - guarded against recursing back into _run).
+#
+# THREAT MODEL: this is arbitrary command execution driven by mise.toml,
+# which is normally committed to the repo. Anyone who clones a repo with a
+# `_run`-bearing mise.toml and has mise shell integration active runs that
+# command the instant they `cd` in - no prompt. Only use this in a
+# mise.toml you don't share, or fully trust everyone with push access to.
+#
+# [env._.git-branch-env.branches.main]
+# PULUMI_STACK = "production"
+# _run = "pulumi stack select $PULUMI_STACK"
+#
+# [env._.git-branch-env.branches.develop]
+# PULUMI_STACK = "dev"
+# _run = "pulumi stack select $PULUMI_STACK"
+
+# --- Also triggering on directory enter/leave (not branch change) ---------
+# _run only fires on a branch change while already inside the repo - it
+# doesn't know about `cd`. For that, use mise's own [hooks] table (separate
+# mise feature, not part of this plugin):
+#
+# [hooks]
+# enter = "pulumi stack select \"$(mise env --json | jq -r '.PULUMI_STACK // empty')\""
+# leave = "pulumi stack select default 2>/dev/null || true"
+#
+# Two things that look obvious but aren't:
+# - Quote the INNER shell command with \" not ' - the TOML string's own
+#   quotes don't matter, but single-quoting inside the shell command you
+#   write blocks $VAR expansion (verified: enter = "echo '$GIT_BRANCH'"
+#   prints the literal text "$GIT_BRANCH", not the branch name).
+# - `leave` can NEVER read this plugin's resolved vars, not via $VAR and
+#   not via `mise env --json` - by the time it runs, mise already treats
+#   the shell as outside the project. Hardcode what `leave` should do
+#   (like "default" above), or capture a value to a file during `enter`
+#   and have `leave` read that file back.
+EOF
+
+echo "Added git-branch-env scaffolding to $TOML (edit it, uncomment what you need)." >&2
