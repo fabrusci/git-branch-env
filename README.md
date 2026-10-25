@@ -225,6 +225,15 @@ _run = "pulumi stack select $PULUMI_STACK"
   every prompt" the way v1's `git` forking did.
 - Only takes effect inside a git repo (there's no branch to key the
   "did it change" check on otherwise).
+- Safe to call another mise-managed tool (like `pulumi` itself, if it's a
+  mise shim) from inside `_run`. That shim resolves its own version by
+  re-evaluating mise's environment for the same directory, which calls
+  back into this plugin - without a guard against that, it recurses
+  indefinitely (reproduced directly: `_run` calling `mise env` hung until
+  killed; `pulumi version` with no version configured looped on "No
+  version is set for shim" instead of failing once). A reentrancy check
+  breaks this at the second call, so you just get the tool's normal
+  output/error once, not a loop.
 
 **Read this before using it:** `_run` is arbitrary command execution
 triggered by `.mise.toml`, which is typically committed to the repo. If

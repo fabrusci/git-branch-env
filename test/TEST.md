@@ -235,6 +235,32 @@ temporaneo, nessun side-effect reale), ma non va mai messo in un
 `.mise.toml` condiviso senza fidarti di chiunque possa pusciare su quel
 repo — vedi README.md per il threat model completo.
 
+## 12. `_run` che richiama un tool gestito da mise (anti-reentranza)
+
+Se `_run` invoca un altro tool gestito da mise (uno shim, es. `pulumi`,
+`aws`, `kubectl`...), quel tool risolve la propria versione
+ri-valutando l'ambiente mise per la stessa directory — che richiama di
+nuovo questo plugin — che richiamerebbe di nuovo `_run` — ricorsione. Il
+branch `run-recursive-demo` riproduce questo in modo sicuro (`_run =
+"mise env >/dev/null 2>&1"`, senza dipendere da nessun tool esterno).
+
+```bash
+cd demo
+git checkout run-recursive-demo
+timeout 10 mise env >/dev/null 2>&1
+echo "exit=$?"
+```
+Atteso: `exit=0`, quasi istantaneo. Se invece vedi `exit=124` (ucciso dal
+`timeout` esterno), la guardia di reentranza (`GIT_BRANCH_ENV_RUN_ACTIVE`)
+non sta funzionando — è esattamente il bug che ha fatto scattare questo
+scenario: un `_run` con `pulumi version` (o qualsiasi altro tool shim-mato
+da mise senza versione configurata) andava in loop fino al timeout di 15s,
+con l'errore "No version is set for shim" ripetuto più volte.
+
+```bash
+mise env | grep -i "GIT_BRANCH_ENV_RUN_ACTIVE" || echo "corretto: la guardia non è mai esportata"
+```
+
 ## Pulizia della fixture
 
 ```bash

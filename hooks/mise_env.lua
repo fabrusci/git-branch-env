@@ -36,6 +36,16 @@ local PASS_CACHE_DIR = (os.getenv("TMPDIR") or "/tmp") .. "/mise-git-branch-env-
 local RUN_TIMEOUT_SECONDS = 15
 local RUN_STATE_DIR = (os.getenv("TMPDIR") or "/tmp") .. "/mise-git-branch-env-run-state"
 
+-- Reentrancy guard: if `_run` invokes another mise-managed tool (a shim,
+-- e.g. `pulumi`), that shim resolves its own version by re-evaluating
+-- mise's environment for this same directory - which calls this plugin's
+-- MiseEnv again, before the outer _run has returned and updated the "last
+-- branch seen" marker. Without this guard that recurses: _run -> shim ->
+-- mise env -> MiseEnv -> _run -> shim -> ... Verified directly (a `_run`
+-- that calls `mise env` hangs/loops until killed) and that this env-var
+-- check breaks it cleanly at the second level.
+local RUN_GUARD_ENV = "GIT_BRANCH_ENV_RUN_ACTIVE"
+
 -- POSIX single-quote escaping: wraps `s` so it is passed to /bin/sh as one
 -- literal argument, regardless of its content (spaces, `"`, `$`, backticks,
 -- `;`, etc). Needed because PASS_CACHE_DIR is derived from the TMPDIR env
@@ -239,11 +249,14 @@ end
 -- apply to the command's last statement, not everything before it.
 local function run_on_branch_change(head_path, current_branch, command, resolved_env, feature_in_use)
     if not feature_in_use then return end
+    if os.getenv(RUN_GUARD_ENV) == "1" then return end
     if read_last_branch(head_path) == current_branch then return end
 
     if command then
+        local run_env = env_entries_to_table(resolved_env)
+        run_env[RUN_GUARD_ENV] = "1"
         pcall(cmd.stream, "sh -c " .. shell_quote("{ " .. command .. "; } 1>&2"), {
-            env = env_entries_to_table(resolved_env),
+            env = run_env,
             timeout = RUN_TIMEOUT_SECONDS,
         })
     end

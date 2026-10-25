@@ -120,6 +120,15 @@ cat >> .mise.toml <<EOF
 APP_ENV = "run-demo"
 RUN_LOG = "$DEMO/run-demo.log"
 _run = "echo RAN branch=\$GIT_BRANCH app=\$APP_ENV >> \$RUN_LOG; echo '_run says: now on '\$GIT_BRANCH' (this line is on stderr, not captured by mise)'"
+
+# --- _run reentrancy demo: _run calling back into mise itself (e.g. what
+# happens when it calls a mise-shimmed tool like `pulumi`, which resolves
+# its own version by re-evaluating mise's env for this same directory).
+# Without the reentrancy guard this recurses indefinitely. See TEST.md
+# section 12.
+[env._.git-branch-env.branches.run-recursive-demo]
+APP_ENV = "run-recursive-demo"
+_run = "mise env >/dev/null 2>&1"
 EOF
 
 git add .mise.toml
@@ -135,6 +144,7 @@ git checkout -q -b bugfix/login-fix main
 git checkout -q -b hotfix/urgent-payment main
 git checkout -q -b chore/cleanup-temp main
 git checkout -q -b secrets-demo main
+git checkout -q -b run-recursive-demo main
 git checkout -q -b worktree-demo main
 git checkout -q -b run-demo main
 git checkout -q main

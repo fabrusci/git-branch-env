@@ -224,6 +224,26 @@ Mechanics:
 - The marker directory/file get the same `0700`/`0600` hardening as the
   `pass` cache, even though a branch name isn't secret — consistency, not
   a security requirement here.
+- Reentrancy-safe against `_run` calling another mise-managed tool. A
+  mise shim (e.g. `pulumi`, if it's one on your system) resolves its own
+  version by re-evaluating mise's environment for the same directory,
+  which calls `MiseEnv` again - and without a guard, that recurses:
+  `_run` → shim → mise env → `MiseEnv` → `_run` → shim → ... This was
+  found, not theorized: `pulumi version` with no version configured
+  looped, printing "No version is set for shim: pulumi" repeatedly for
+  several seconds instead of failing once; a minimal repro (`_run = "mise
+  env"`) hung for the full external 10s test timeout with zero output.
+  Fixed with a reentrancy guard: before running `_run`, a
+  `GIT_BRANCH_ENV_RUN_ACTIVE=1` sentinel is added to the child's `env`
+  table (on top of the branch's resolved vars); at the top of
+  `run_on_branch_change`, if that sentinel is already present in *our
+  own* process environment (inherited from a parent `_run` invocation, by
+  normal process env inheritance down the `sh -c` → shim → mise chain),
+  the function returns immediately without touching the marker or
+  running anything. Verified directly: the same `_run = "mise env"` case
+  now completes instantly: the outer call runs it once, the nested
+  `mise env` call sees the guard and skips re-running `_run`, environment
+  variables still resolve correctly throughout.
 
 **Threat model:** `_run` is arbitrary command execution driven by
 `.mise.toml`, a file that's normally committed to the repo. Anyone who
