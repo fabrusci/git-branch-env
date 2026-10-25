@@ -3,8 +3,9 @@
 Scaffolds a scratch git repo (plus a worktree and a non-git directory)
 exercising every configuration option the plugin supports - `default`,
 exact `branches`, prefix/glob `patterns`, priority rules, detached HEAD,
-worktree HEAD resolution, and (optionally) `pass` secrets - and links this
-checkout of the plugin into it so you can try it end to end.
+worktree HEAD resolution, `_run` (a command executed once per real branch
+change), and (optionally) `pass` secrets - and links this checkout of the
+plugin into it so you can try it end to end.
 
 ## Quickstart
 

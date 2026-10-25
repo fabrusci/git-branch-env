@@ -154,6 +154,70 @@ tuo password store reale. Per provarlo:
 6. Pulizia: `pass rm test/git-branch-env-demo/secret` e ricommenta il blocco
    nel `.mise.toml` (o semplicemente non riusare questa fixture).
 
+## 11. `_run`: comando eseguito al cambio di branch
+
+A differenza dello scenario `pass`, questo è già abilitato di default nella
+fixture (non richiede setup esterno): il branch `run-demo` ha
+`_run = "echo RAN branch=$GIT_BRANCH app=$APP_ENV >> $RUN_LOG"`, con
+`RUN_LOG` che punta a un file dentro la stessa fixture.
+
+Nota: come per ogni altro scenario in questa guida, `_run` viene valutato
+solo quando mise ricalcola l'ambiente (`mise env`, o il prompt della shell
+con l'integrazione attiva) — un semplice `git checkout` da solo, senza una
+chiamata successiva a `mise env`, non attiva nulla.
+
+```bash
+cd demo
+rm -f run-demo.log
+git checkout run-demo    # primo ingresso sul branch
+mise env >/dev/null      # -> deve eseguire
+cat run-demo.log
+```
+Atteso: una riga `RAN branch=run-demo app=run-demo`.
+
+```bash
+mise env >/dev/null      # stesso branch, nessun nuovo switch -> NON deve rieseguire
+cat run-demo.log
+```
+Atteso: ancora una sola riga.
+
+```bash
+git checkout main        # switch via (main non definisce _run)
+mise env >/dev/null
+git checkout run-demo    # e ritorno -> un nuovo vero cambio di branch, deve rieseguire
+mise env >/dev/null
+cat run-demo.log
+```
+Atteso: una seconda riga `RAN branch=run-demo app=run-demo`. Il passaggio
+per `main` (che non ha `_run`) non deve "nascondere" il cambiamento: il
+marker di stato traccia l'ultimo branch visto indipendentemente dal fatto
+che quel branch definisca `_run` o no — altrimenti un giro A → B (senza
+`_run`) → A verrebbe letto come "nessun cambiamento" al ritorno su A.
+
+```bash
+mise env | grep -i "_run" || echo "corretto: _run non è mai esportata come env var"
+```
+
+Verifica anche i permessi del marker di stato (stessa logica 700/600 della
+cache `pass`, qui senza TTL):
+```bash
+stat -c '%a' "${TMPDIR:-/tmp}/mise-git-branch-env-run-state"      # atteso: 700
+stat -c '%a' "${TMPDIR:-/tmp}/mise-git-branch-env-run-state"/*    # atteso: 600
+```
+
+Per testare il caso di fallimento/timeout senza modificare la fixture,
+puoi temporaneamente cambiare `_run` in `demo/.mise.toml` sul branch
+`run-demo` in `_run = "exit 1"` oppure `_run = "sleep 20"` (timeout a 15s):
+in entrambi i casi `mise env` deve comunque restituire le altre variabili
+correttamente, e una seconda chiamata subito dopo (stesso branch) deve
+essere istantanea — il comando rotto non viene ritentato ad ogni prompt.
+
+**Attenzione:** `_run` esegue comandi arbitrari ogni volta che entri in un
+repo con un branch per cui è definito. Va bene per questa fixture (file
+temporaneo, nessun side-effect reale), ma non va mai messo in un
+`.mise.toml` condiviso senza fidarti di chiunque possa pusciare su quel
+repo — vedi README.md per il threat model completo.
+
 ## Pulizia della fixture
 
 ```bash

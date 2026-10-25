@@ -202,20 +202,41 @@ local function env_entries_to_table(entries)
     return t
 end
 
+-- True if `_run` is set anywhere in the config (default, any pattern, any
+-- branch) - not just on the currently-resolved block. Gates all the state
+-- file I/O below, so a project that never uses `_run` pays nothing for it
+-- on every single prompt.
+local function any_run_defined(default_env, branches, patterns)
+    if default_env["_run"] ~= nil then return true end
+    for _, env in pairs(branches) do
+        if env["_run"] ~= nil then return true end
+    end
+    for _, env in pairs(patterns) do
+        if env["_run"] ~= nil then return true end
+    end
+    return false
+end
+
 -- Runs `command` through a real shell (so $VARS, &&, pipes etc. all work)
 -- with every resolved env var for this branch available to it, but only
--- once per actual branch change - never on every prompt. Best-effort: a
--- failing or timed-out command is silently skipped either way (same
--- philosophy as `pass`), and the "last seen" marker is updated regardless
--- so a broken command doesn't get retried on every single prompt.
-local function run_on_branch_change(head_path, current_branch, command, resolved_env)
-    if not command then return end
+-- once per actual branch change - never on every prompt. The "last seen"
+-- marker is tracked independently of whether the *current* branch defines
+-- `_run`: otherwise bouncing through a branch with no `_run` (A -> B -> A,
+-- B undefined) would never update the marker on B, making the return to A
+-- look unchanged and silently skip a re-run that should happen. Best-
+-- effort: a failing or timed-out command is silently skipped (same
+-- philosophy as `pass`), and the marker is still updated so a broken
+-- command doesn't get retried on every single prompt.
+local function run_on_branch_change(head_path, current_branch, command, resolved_env, feature_in_use)
+    if not feature_in_use then return end
     if read_last_branch(head_path) == current_branch then return end
 
-    pcall(cmd.exec, "sh -c " .. shell_quote(command), {
-        env = env_entries_to_table(resolved_env),
-        timeout = RUN_TIMEOUT_SECONDS,
-    })
+    if command then
+        pcall(cmd.exec, "sh -c " .. shell_quote(command), {
+            env = env_entries_to_table(resolved_env),
+            timeout = RUN_TIMEOUT_SECONDS,
+        })
+    end
 
     write_last_branch(head_path, current_branch)
 end
@@ -282,7 +303,7 @@ function PLUGIN:MiseEnv(ctx)
     -- so both are skipped (the hook keeps running every time as before -
     -- it's cheap: just the `default` config block, no git I/O).
     if head_path then
-        run_on_branch_change(head_path, current_branch, run_command, env_vars)
+        run_on_branch_change(head_path, current_branch, run_command, env_vars, any_run_defined(default_env, branches, patterns))
         return { env = env_vars, cacheable = true, watch_files = { head_path } }
     end
     return { env = env_vars }

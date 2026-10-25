@@ -110,6 +110,18 @@ PATTERN_SOURCE = "feat-glob"
 # DEMO_SECRET = { pass = "your/own/pass/entry" }
 EOF
 
+# Appended unquoted so $DEMO expands to an absolute path now; $GIT_BRANCH/
+# $APP_ENV/$RUN_LOG must stay literal (escaped) - those are expanded later,
+# at _run's execution time, not now.
+cat >> .mise.toml <<EOF
+
+# --- _run demo: runs once per real branch change, see TEST.md section 11 ---
+[env._.git-branch-env.branches.run-demo]
+APP_ENV = "run-demo"
+RUN_LOG = "$DEMO/run-demo.log"
+_run = "echo RAN branch=\$GIT_BRANCH app=\$APP_ENV >> \$RUN_LOG"
+EOF
+
 git add .mise.toml
 git commit -q -m "add mise.toml"
 
@@ -124,6 +136,7 @@ git checkout -q -b hotfix/urgent-payment main
 git checkout -q -b chore/cleanup-temp main
 git checkout -q -b secrets-demo main
 git checkout -q -b worktree-demo main
+git checkout -q -b run-demo main
 git checkout -q main
 
 git worktree add -q "$WT" worktree-demo
